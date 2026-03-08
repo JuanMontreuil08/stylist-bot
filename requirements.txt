@@ -1,0 +1,15 @@
+strands-agents
+strands-agents-tools
+uv
+boto3
+bedrock-agentcore<=0.1.5
+bedrock-agentcore-starter-toolkit==0.1.14
+fastapi
+uvicorn[standard]
+httpx
+python-dotenv
+requests
+twilio
+deepgram-sdk
+cartesia
+xai-sdk
