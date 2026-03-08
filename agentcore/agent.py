@@ -8,7 +8,7 @@ from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands.models import BedrockModel
 from dotenv import load_dotenv
-from agentcore.tools import search_clothing_catalog, search_products_online
+from agentcore.tools import search_clothing_catalog, search_products_online, initiate_voice_call
 from utils.handle_kapso_image import convert_kapso_image_to_bytes
 load_dotenv()
 
@@ -36,7 +36,7 @@ model = BedrockModel(
 agent = Agent(
     model=model,
     system_prompt=SYSTEM_PROMPT,
-    tools=[search_clothing_catalog, search_products_online]
+    tools=[search_clothing_catalog, search_products_online, initiate_voice_call]
 )
 
 @app.entrypoint

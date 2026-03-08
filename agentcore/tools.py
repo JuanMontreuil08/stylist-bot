@@ -180,4 +180,34 @@ def search_products_online(query: str, user_context: str | None = None) -> str:
     if not api_key:
         return "Online product search is not configured (missing PERPLEXITY_API_KEY). I can only search our clothing catalog."
     print("[search_products_online] query:", repr(query), "context:", repr(user_context))
-    return _call_perplexity_product_search(query, user_context, api_key) 
+    return _call_perplexity_product_search(query, user_context, api_key)
+
+
+VOICE_BOT_URL = os.getenv("VOICE_BOT_URL", "").rstrip("/")
+
+
+@tool
+def initiate_voice_call(phone_number: str, opening_message: str) -> str:
+    """Start a voice call to the user. Use it whenever the user asks to be called, follows up by phone, or wants to contact by voice.
+
+    Args:
+        phone_number: Phone number in E.164 format (ej. +51995132783).
+        opening_message: Opening message that the bot will say when connecting the call. You must generate it from the conversation (e.g. "Hello, here Benito from The North Face. I'm calling you for your inquiry about sizes. How can I help you?"). Do not leave this field empty.
+    """
+    if not VOICE_BOT_URL:
+        return "Voice calls are not configured (missing VOICE_BOT_URL in the environment)."
+    opening_message = (opening_message or "").strip()
+    if not opening_message:
+        return "Error: opening_message is required. Generate an opening message for the call."
+    try:
+        r = requests.post(
+            f"{VOICE_BOT_URL}/api/start-call",
+            json={"phone_number": phone_number, "opening_message": opening_message},
+            timeout=15,
+        )
+        data = r.json() if "application/json" in (r.headers.get("content-type") or "") else {}
+        if data.get("ok"):
+            return "Call initiated. We will contact you soon."
+        return data.get("error", f"Error {r.status_code}") or "Call could not be initiated."
+    except requests.RequestException as e:
+        return f"Could not connect to the voice service: {e}"

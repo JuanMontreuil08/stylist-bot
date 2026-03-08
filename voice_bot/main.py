@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.rest import Client
 from dotenv import load_dotenv
@@ -33,6 +34,34 @@ VOICE_CONFIG = {
 
 # Use Redis in production
 conversations = {}
+# Mensaje de apertura por número: lo envía el agente y se usa en el primer POST /voice.
+pending_opening_message: dict[str, str] = {}
+
+
+class StartCallBody(BaseModel):
+    phone_number: str
+    opening_message: str  # Obligatorio: mensaje que el bot dirá al conectar (generado por el agente).
+
+
+@app.post("/api/start-call")
+async def api_start_call(body: StartCallBody):
+    """Inicia una llamada saliente. Usado por la tool del agente. opening_message es la frase que el bot dirá al conectar (generada por el agente)."""
+    phone = (body.phone_number or "").strip()
+    if not phone:
+        return {"ok": False, "error": "phone_number required"}
+    msg = (body.opening_message or "").strip()
+    if not msg:
+        return {"ok": False, "error": "opening_message required"}
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    pending_opening_message[phone] = msg
+    try:
+        call_sid = start_call(phone)
+        return {"ok": True, "call_sid": call_sid}
+    except Exception as e:
+        pending_opening_message.pop(phone, None)
+        return {"ok": False, "error": str(e)}
+
 
 @app.get("/voice")
 async def voice_webhook_get():
@@ -50,8 +79,13 @@ async def voice_webhook(request: Request):
     intent = ""
 
     if call_sid not in conversations:
-        conversations[call_sid] = {"context": "New upsell call.", "turn": 0}
-        initial_pitch = "Hola, aquí Benito de The North Face. Veo que utilizaste tu nueva cortaviento hace unos días. Nos gustaría saber si tienes alguna opinión o duda sobre el producto para poder ayudarte."
+        to_number = (form.get("To") or "").strip()
+        initial_pitch = pending_opening_message.pop(to_number, None)
+        if not initial_pitch:
+            response.say("Disculpa, no se pudo cargar el mensaje de inicio. Por favor intenta de nuevo más tarde.")
+            response.hangup()
+            return Response(content=str(response), media_type="application/xml")
+        conversations[call_sid] = {"context": initial_pitch, "turn": 0}
         audio_url = await generate_tts_url(initial_pitch)
         response.play(audio_url)
     else:
