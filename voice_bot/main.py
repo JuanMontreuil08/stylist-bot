@@ -9,7 +9,7 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 from cartesia import Cartesia
 
-from llm_handler import generate_response
+from .llm_handler import generate_response
 
 load_dotenv()
 
