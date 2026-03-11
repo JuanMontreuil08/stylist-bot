@@ -67,3 +67,9 @@ logs/
 
 # --- Images ---
 images/
+
+# --- Keys ---
+keys/
+
+# --- gitignore ---
+.gitignore
