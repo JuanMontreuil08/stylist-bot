@@ -25,12 +25,11 @@ OUTPUT_VOICES.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(OUTPUT_VOICES)), name="static")
 
 cartesia_client = Cartesia(api_key=os.getenv("CARTESIA_API_KEY"))
-VOICE_ID = "b0689631-eee7-4a6c-bb86-195f1d267c2e"
-VOICE_CONFIG = {
-    "mode": "id",
-    "id": VOICE_ID,
-    "__experimental_controls": {"emotion": ["positivity:high"], "speed": 0.3},
-}
+# Sonic 3: voz estable recomendada para voice agents (Kiefer, inglés; natural en español con language="es")
+VOICE_ID = "228fca29-3a0a-435c-8728-5cb483251068"  # Kiefer
+VOICE_CONFIG = {"mode": "id", "id": VOICE_ID}
+# Menos latencia (speed 1.15) y naturalidad (emotion content) — solo aplica con model_id sonic-3
+GENERATION_CONFIG = {"speed": 1.15, "emotion": "content"}
 
 # Use Redis in production
 conversations = {}
@@ -126,11 +125,13 @@ async def voice_webhook(request: Request):
     return Response(content=str(response), media_type="application/xml")
 
 def _generate_tts_sync(transcript: str, wav_path: Path) -> None:
-    """Genera audio con Cartesia y guarda en wav_path (bloqueante)."""
+    """Genera audio con Cartesia Sonic 3 y guarda en wav_path (bloqueante)."""
     stream = cartesia_client.tts.bytes(
-        model_id="sonic",
+        model_id="sonic-3",
         transcript=transcript,
         voice=VOICE_CONFIG,
+        language="es",
+        generation_config=GENERATION_CONFIG,
         output_format={
             "container": "wav",
             "encoding": "pcm_s16le",
