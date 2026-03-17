@@ -184,6 +184,10 @@ def search_products_online(query: str, user_context: str | None = None) -> str:
 
 
 VOICE_BOT_URL = os.getenv("VOICE_BOT_URL", "").rstrip("/")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+TRYON_INPUTS_BUCKET = os.getenv("TRYON_INPUTS_BUCKET", "tryon-inputs").strip()
+TRYON_SIGNED_URL_TTL_SECONDS = int(os.getenv("TRYON_SIGNED_URL_TTL_SECONDS", "3600"))
 
 
 @tool
@@ -211,3 +215,104 @@ def initiate_voice_call(phone_number: str, opening_message: str) -> str:
         return data.get("error", f"Error {r.status_code}") or "Call could not be initiated."
     except requests.RequestException as e:
         return f"Could not connect to the voice service: {e}"
+
+
+@tool
+def tryon_get_profile(phone_number: str) -> str:
+    """Fetch try-on profile for a user and return signed URLs to inputs (selfie + full body).
+
+    Args:
+        phone_number: Phone number in E.164 format (e.g. +51995132783). Used as user_id.
+
+    Returns:
+        JSON string:
+        {
+          "ok": true,
+          "exists": true|false,
+          "user_id": "+519...",
+          "has_selfie": true|false,
+          "has_full_body": true|false,
+          "selfie_path": "...",
+          "full_body_path": "...",
+          "selfie_url": "https://...signed...",
+          "full_body_url": "https://...signed..."
+        }
+    """
+    user_id = (phone_number or "").strip()
+    if not user_id:
+        return json.dumps({"ok": False, "error": "phone_number is required"})
+    if not user_id.startswith("+"):
+        user_id = "+" + user_id
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "Supabase not configured (missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY).",
+            }
+        )
+
+    try:
+        from supabase import create_client  # type: ignore[import-not-found]
+
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+        # Support either schema: phone_e164 OR user_id as the primary key column.
+        data = None
+        for col in ("phone_e164", "user_id"):
+            try:
+                resp = (
+                    supabase.table("tryon_profiles")
+                    .select("selfie_path,full_body_path")
+                    .eq(col, user_id)
+                    .limit(1)
+                    .execute()
+                )
+                rows = getattr(resp, "data", None) or []
+                if rows:
+                    data = rows[0]
+                    break
+            except Exception:
+                # Column might not exist; try next one.
+                continue
+
+        if not data:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "exists": False,
+                    "user_id": user_id,
+                    "has_selfie": False,
+                    "has_full_body": False,
+                }
+            )
+
+        selfie_path = (data.get("selfie_path") or "").strip() or None
+        full_body_path = (data.get("full_body_path") or "").strip() or None
+
+        has_selfie = bool(selfie_path)
+        has_full_body = bool(full_body_path)
+
+        selfie_url = None
+        full_body_url = None
+        storage = supabase.storage.from_(TRYON_INPUTS_BUCKET)
+        if selfie_path:
+            selfie_url = storage.create_signed_url(selfie_path, TRYON_SIGNED_URL_TTL_SECONDS).get("signedURL")
+        if full_body_path:
+            full_body_url = storage.create_signed_url(full_body_path, TRYON_SIGNED_URL_TTL_SECONDS).get("signedURL")
+
+        return json.dumps(
+            {
+                "ok": True,
+                "exists": True,
+                "user_id": user_id,
+                "has_selfie": has_selfie,
+                "has_full_body": has_full_body,
+                "selfie_path": selfie_path,
+                "full_body_path": full_body_path,
+                "selfie_url": selfie_url,
+                "full_body_url": full_body_url,
+            }
+        )
+    except Exception as e:
+        return json.dumps({"ok": False, "error": f"Failed to fetch try-on profile: {e}"})

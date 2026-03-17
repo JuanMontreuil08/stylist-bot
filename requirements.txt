@@ -13,3 +13,4 @@ twilio
 deepgram-sdk
 cartesia
 xai-sdk
+supabase
