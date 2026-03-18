@@ -452,6 +452,9 @@ def tryon_generate(
     Supabase URL (temporary) so the WhatsApp handler can display it.
 
     Inputs are URLs pointing to images (selfie, full body, polo, pantalon).
+    The polo/pantalon URLs may be either:
+    - `s3://bucket/key` (from the catalog)
+    - `https://...` (Supabase signed URLs, or public S3 URLs)
     """
     phone_number = (phone_number or "").strip()
     if not phone_number:
@@ -461,7 +464,21 @@ def tryon_generate(
         # Lazy imports so the rest of the tools work without OpenVTO installed.
         # OpenVTO and PIL imports are at module-level.
 
+        def _to_download_url(url: str) -> str:
+            url = (url or "").strip()
+            if url.startswith("s3://"):
+                # Convert to public S3 HTTP URL so requests can download it.
+                # Example: s3://my-bucket/path/to/file.jpg -> https://my-bucket.s3.amazonaws.com/path/to/file.jpg
+                remainder = url[len("s3://") :]
+                bucket, _, key = remainder.partition("/")
+                if bucket and key is not None:
+                    return f"https://{bucket}.s3.amazonaws.com/{key}"
+            return url
+
         def _download_to_temp_image(url: str, prefix: str) -> str:
+            url = _to_download_url((url or "").strip())
+            if not url:
+                raise ValueError(f"Missing {prefix} image URL")
             r = requests.get(url, timeout=45)
             r.raise_for_status()
             img_bytes = r.content or b""
@@ -485,14 +502,27 @@ def tryon_generate(
                     f.write(img_bytes)
             return tmp_path
 
+        clothes_paths: list[str] = []
+
         selfie_path = _download_to_temp_image(selfie_url, "selfie")
         full_body_path = _download_to_temp_image(full_body_url, "full_body")
-        polo_path = _download_to_temp_image(polo_url, "polo")
-        pantalon_path = _download_to_temp_image(pantalon_url, "pantalon")
+
+        polo_url = (polo_url or "").strip()
+        pantalon_url = (pantalon_url or "").strip()
+
+        if polo_url:
+            polo_path = _download_to_temp_image(polo_url, "polo")
+            clothes_paths.append(polo_path)
+        if pantalon_url:
+            pantalon_path = _download_to_temp_image(pantalon_url, "pantalon")
+            clothes_paths.append(pantalon_path)
+
+        if not clothes_paths:
+            return json.dumps({"ok": False, "error": "At least one garment URL is required (polo_url or pantalon_url)."})
 
         vto = OpenVTO(provider="google", image_model=ImageModel.NANO_BANANA.value)
         avatar = vto.generate_avatar(selfie=selfie_path, posture=full_body_path)
-        tryon = vto.generate_tryon(avatar=avatar, clothes=[polo_path, pantalon_path])
+        tryon = vto.generate_tryon(avatar=avatar, clothes=clothes_paths)
 
         if not hasattr(tryon, "image") or tryon.image is None:
             return json.dumps({"ok": False, "error": "OpenVTO did not return an output image"})
