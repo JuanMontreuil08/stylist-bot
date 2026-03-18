@@ -8,7 +8,15 @@ from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands.models import BedrockModel
 from dotenv import load_dotenv
-from agentcore.tools import search_clothing_catalog, search_products_online, initiate_voice_call, tryon_get_profile, tryon_upload_photo
+from agentcore.tools import (
+    search_clothing_catalog,
+    search_products_online,
+    initiate_voice_call,
+    tryon_get_profile,
+    tryon_upload_photo,
+    tryon_search_garments,
+    tryon_generate,
+)
 from utils.handle_kapso_image import convert_kapso_image_to_bytes
 load_dotenv()
 
@@ -36,7 +44,15 @@ model = BedrockModel(
 agent = Agent(
     model=model,
     system_prompt=SYSTEM_PROMPT,
-    tools=[search_clothing_catalog, search_products_online, initiate_voice_call, tryon_get_profile, tryon_upload_photo]
+    tools=[
+        search_clothing_catalog,
+        search_products_online,
+        initiate_voice_call,
+        tryon_get_profile,
+        tryon_upload_photo,
+        tryon_search_garments,
+        tryon_generate,
+    ],
 )
 
 @app.entrypoint
@@ -57,9 +73,13 @@ def strands_agent_bedrock(payload):
             return "Cannot load image. Try again."
         content = []
         instruction = (
-            "El usuario envió esta imagen. Clasifícala en exactamente una categoría: selfie, full_body o garment. "
-            "Si es garment, escribe una descripción corta (ej: polo negro, short beige). "
-            "Luego llama tryon_upload_photo con phone_number=%r, image_url=%r, photo_type=<tu clasificación>, garment_description=<solo si es garment, si no \"\">."
+            "The user sent this image. Classify it into exactly one category: selfie, full_body, or garment. "
+            "If it is garment, write garment_description EXACTLY in the strict format: <type>_<color>_<brand> (ASCII, lowercase, no accents, using ONLY underscores; NO commas or spaces). "
+            "The <type> must be the real garment type (e.g. polo, pantalon, camiseta, chaqueta). "
+            "The <color> must be a simple color (e.g. rojo, negro, beige, azul). "
+            "The <brand> must be the brand if recognized; otherwise use 'marca_desconocida'. "
+            "Examples: polo_rojo_lacoste, pantalon_beige_zara, camiseta_azul_nike. "
+            "Then call tryon_upload_photo with phone_number=%r, image_url=%r, photo_type=<your classification>, garment_description=<only if garment; otherwise \"\">."
         ) % (phone_number or "", image_url)
         content.append({"text": instruction})
         if prompt:

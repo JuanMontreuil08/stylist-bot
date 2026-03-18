@@ -24,6 +24,7 @@ TRYON_SIGNED_URL_TTL = int(os.getenv("TRYON_SIGNED_URL_TTL_SECONDS", "3600"))
 # Incluir corchetes en el match para no dejar "[" o "]" sueltos en el texto
 S3_URI_BRACKET_RE = re.compile(r'\[\s*s3://([^/\s]+)/([^\s\]]+)\s*\]')
 S3_URI_BARE_RE = re.compile(r's3://([^/\s]+)/([^\s]+)')
+SUPABASE_STORAGE_OBJECT_URL_RE = re.compile(r'https://[^\s]+/storage/v1/object/[^\s]+')
 
 s3_client = boto3.client(
     "s3",
@@ -50,16 +51,22 @@ def _presigned_url(bucket: str, key: str):
 
 
 def _split_text_and_s3(reply: str):
-    """Separa texto de URIs S3. Retorna (texto_limpio, lista_urls_publicas)."""
+    """Separa texto de URIs S3 y URLs firmadas de Supabase. Retorna (texto_limpio, lista_urls)."""
     urls = []
 
+    # 0) Supabase signed object URLs (ej: https://.../storage/v1/object/<bucket>/<key>?token=...)
+    for m in SUPABASE_STORAGE_OBJECT_URL_RE.finditer(reply):
+        url = m.group(0).rstrip(").,];")
+        urls.append(url)
+    text = SUPABASE_STORAGE_OBJECT_URL_RE.sub("", reply)
+
     # 1) Formato [s3://bucket/key] (incluye corchetes para no dejar "[" o "]" sueltos)
-    for m in S3_URI_BRACKET_RE.finditer(reply):
+    for m in S3_URI_BRACKET_RE.finditer(text):
         bucket, key = m.group(1), m.group(2)
         public_url = f"https://{bucket}.s3.amazonaws.com/{key}"
         urls.append(public_url)
         print(f"[DEBUG] S3 (bracketed) s3://{bucket}/{key} -> {public_url}")
-    text = S3_URI_BRACKET_RE.sub("", reply)
+    text = S3_URI_BRACKET_RE.sub("", text)
 
     # 2) Por si el agente devuelve s3:// sin corchetes
     for m in S3_URI_BARE_RE.finditer(text):
@@ -70,7 +77,7 @@ def _split_text_and_s3(reply: str):
     text = S3_URI_BARE_RE.sub("", text)
 
     text = re.sub(r"\n{2,}", "\n\n", text).strip()
-    print(f"[DEBUG] Found {len(urls)} S3 URIs in reply")
+    print(f"[DEBUG] Found {len(urls)} URIs in reply")
     return text, urls
 
 

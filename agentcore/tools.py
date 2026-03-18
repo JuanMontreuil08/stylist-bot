@@ -2,12 +2,17 @@ import os
 import json
 import traceback
 import uuid
+import io
+import tempfile
 import boto3
 import requests
 from strands import tool
 from dotenv import load_dotenv
 from pydantic import BaseModel
 import unicodedata
+from openvto import OpenVTO
+from openvto.types import ImageModel
+from PIL import Image
 
 load_dotenv()
 
@@ -186,10 +191,12 @@ def search_products_online(query: str, user_context: str | None = None) -> str:
 
 
 VOICE_BOT_URL = os.getenv("VOICE_BOT_URL", "").rstrip("/")
+S3_IMAGE_BUCKET = os.getenv("S3_IMAGE_BUCKET", "").strip()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 TRYON_INPUTS_BUCKET = os.getenv("TRYON_INPUTS_BUCKET", "tryon-inputs").strip()
 TRYON_CLOTHES_BUCKET = os.getenv("TRYON_CLOTHES_BUCKET", "tryon-clothes").strip()
+TRYON_RESULTS_BUCKET = os.getenv("TRYON_RESULTS_BUCKET", "tryon-results").strip()
 TRYON_SIGNED_URL_TTL_SECONDS = int(os.getenv("TRYON_SIGNED_URL_TTL_SECONDS", "3600"))
 
 
@@ -200,8 +207,10 @@ def _sanitize_garment_slug(description: str, max_len: int = 25) -> str:
     # Normalize to ASCII (e.g. "selección" -> "seleccion")
     s = unicodedata.normalize("NFKD", (description or "").strip())
     s = s.encode("ascii", "ignore").decode("ascii")
-    s = "".join(c if c.isalnum() or c in "-_" else " " for c in s)
-    s = "-".join(s.split()).lower()[:max_len].strip("-")
+    # Keep underscores as the only separator; convert any hyphens to underscores.
+    s = s.replace("-", "_")
+    s = "".join(c if c.isalnum() or c == "_" else " " for c in s)
+    s = "_".join(s.split()).lower()[:max_len].strip("_")
     return s or "prenda"
 
 
@@ -345,13 +354,13 @@ def tryon_upload_photo(
     The image is stored in the bucket and table corresponding to the type:
     - selfie → tryon-inputs bucket, profile selfie_path
     - full_body → tryon-inputs bucket, profile full_body_path
-    - garment → tryon-clothes bucket, filename from garment_description (e.g. polo-negro_abc123.jpg)
+    - garment → tryon-clothes bucket, filename from garment_description (e.g. polo_rojo_lacoste_abc123.jpg)
 
     Args:
         phone_number: User phone in E.164 (e.g. +51995132783).
         image_url: URL of the image (e.g. Supabase signed URL from raw bucket). Must be downloadable.
         photo_type: One of "selfie", "full_body", "garment".
-        garment_description: Short description for garments only (e.g. "polo negro", "short beige"). Used to build the filename. Leave empty for selfie/full_body.
+        garment_description: Garment name in strict format `tipo_color_marca` (e.g. `polo_rojo_lacoste`, `pantalon_beige_zara`, `camiseta_azul_nike`). Used to build the filename. Leave empty for selfie/full_body.
 
     Returns:
         Success message or error JSON.
@@ -424,6 +433,233 @@ def tryon_upload_photo(
 
     except requests.RequestException as e:
         return json.dumps({"ok": False, "error": f"Failed to download image: {e}"})
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"ok": False, "error": str(e)})
+
+
+@tool
+def tryon_generate(
+    phone_number: str,
+    selfie_url: str,
+    full_body_url: str,
+    polo_url: str,
+    pantalon_url: str,
+) -> str:
+    """
+    Generate a virtual try-on image using OpenVTO, upload it to Supabase Storage
+    (bucket `TRYON_RESULTS_BUCKET`) under the user's prefix, and return a signed
+    Supabase URL (temporary) so the WhatsApp handler can display it.
+
+    Inputs are URLs pointing to images (selfie, full body, polo, pantalon).
+    """
+    phone_number = (phone_number or "").strip()
+    if not phone_number:
+        return json.dumps({"ok": False, "error": "phone_number is required"})
+
+    try:
+        # Lazy imports so the rest of the tools work without OpenVTO installed.
+        # OpenVTO and PIL imports are at module-level.
+
+        def _download_to_temp_image(url: str, prefix: str) -> str:
+            r = requests.get(url, timeout=45)
+            r.raise_for_status()
+            img_bytes = r.content or b""
+            if not img_bytes:
+                raise ValueError(f"Empty image downloaded for {prefix}")
+
+            ct = (r.headers.get("content-type") or "").lower()
+            tmp_ext = "jpg"
+            if "png" in ct:
+                tmp_ext = "png"
+
+            # OpenVTO is simplest with real image files; normalize to RGB JPEG for JPG path.
+            with tempfile.NamedTemporaryFile(suffix=f".{tmp_ext}", delete=False) as f:
+                tmp_path = f.name
+
+                # If jpg, normalize; if png, keep bytes if it already is png.
+                if tmp_ext == "jpg":
+                    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                    img.save(tmp_path, format="JPEG")
+                else:
+                    f.write(img_bytes)
+            return tmp_path
+
+        selfie_path = _download_to_temp_image(selfie_url, "selfie")
+        full_body_path = _download_to_temp_image(full_body_url, "full_body")
+        polo_path = _download_to_temp_image(polo_url, "polo")
+        pantalon_path = _download_to_temp_image(pantalon_url, "pantalon")
+
+        vto = OpenVTO(provider="google", image_model=ImageModel.NANO_BANANA.value)
+        avatar = vto.generate_avatar(selfie=selfie_path, posture=full_body_path)
+        tryon = vto.generate_tryon(avatar=avatar, clothes=[polo_path, pantalon_path])
+
+        if not hasattr(tryon, "image") or tryon.image is None:
+            return json.dumps({"ok": False, "error": "OpenVTO did not return an output image"})
+        result_bytes = tryon.image
+
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            return json.dumps({"ok": False, "error": "Supabase not configured"})
+        if not TRYON_RESULTS_BUCKET:
+            return json.dumps({"ok": False, "error": "TRYON_RESULTS_BUCKET is not configured"})
+
+        from supabase import create_client  # type: ignore[import-not-found]
+
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        out_path = f"{phone_number}/tryon_{uuid.uuid4().hex}.jpg"
+        supabase.storage.from_(TRYON_RESULTS_BUCKET).upload(
+            out_path,
+            result_bytes,
+            {"content-type": "image/jpeg"},
+        )
+        res = supabase.storage.from_(TRYON_RESULTS_BUCKET).create_signed_url(
+            out_path, TRYON_SIGNED_URL_TTL_SECONDS
+        )
+        signed = (res or {}).get("signedURL") or (res or {}).get("signedUrl")
+        if not signed:
+            return json.dumps({"ok": False, "error": "Could not create signed URL"})
+        return signed
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"ok": False, "error": str(e)})
+
+
+def _normalize_token(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    s = s.replace("-", "_").replace(" ", "_")
+    return s
+
+
+def _predominant_color(color: str) -> str:
+    # If there are multiple colors separated by underscores, keep the first one.
+    norm = _normalize_token(color)
+    return (norm.split("_")[0] if norm else "").strip()
+
+
+@tool
+def tryon_search_garments(
+    phone_number: str,
+    garment_type: str,
+    color: str,
+    brand: str,
+    min_match_parts: int = 2,
+    limit: int = 5,
+) -> str:
+    """
+    Search user garments in Supabase Storage by filename tokens: <type>_<color>_<brand>_<uuid>.<ext>.
+    MVP: return matches where at least `min_match_parts` of (type,color,brand) match.
+
+    The `color` passed in by the agent can contain multiple colors; keep only the predominant one.
+    """
+    phone_number = (phone_number or "").strip()
+    if not phone_number.startswith("+"):
+        phone_number = "+" + phone_number
+    garment_type = _normalize_token(garment_type)
+    color_q = _predominant_color(color)
+    brand_q = (_normalize_token(brand).split("_")[0] if brand else "").strip()
+
+    if not phone_number or not garment_type:
+        return json.dumps({"ok": False, "error": "phone_number and garment_type are required"})
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return json.dumps({"ok": False, "error": "Supabase not configured"})
+
+    try:
+        from supabase import create_client  # type: ignore[import-not-found]
+
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+        prefix = f"{phone_number}/"
+        objects = supabase.storage.from_(TRYON_CLOTHES_BUCKET).list(path=prefix) or []
+
+        matches: list[dict] = []
+        for obj in objects:
+            # supabase-py can return dict keys like: name, id, path (depends on client version)
+            name = (obj or {}).get("name") or (obj or {}).get("id") or (obj or {}).get("path")
+            if not name:
+                continue
+
+            filename = str(name)
+            # If list() returns only filename, it won't include the prefix; if it includes full key, it will.
+            if filename.startswith(prefix):
+                filename = filename[len(prefix):]
+
+            if "/" in filename:
+                # In case list returns nested paths, skip.
+                continue
+
+            if "." not in filename:
+                continue
+
+            base = filename.rsplit(".", 1)[0]  # slug + _ + uuid
+            parts = base.split("_")
+            if len(parts) < 4:
+                continue
+
+            # Assume last token is uuid; everything before is slug: <type>_<color>_<brand>
+            slug_parts = parts[:-1]
+            if len(slug_parts) < 3:
+                continue
+
+            type_s = _normalize_token(slug_parts[0])
+            brand_s = _normalize_token(slug_parts[-1]).split("_")[0] if slug_parts[-1] else ""
+            color_combined = "_".join(slug_parts[1:-1])
+            color_s = _predominant_color(color_combined)
+
+            score = 0
+            if type_s == garment_type:
+                score += 1
+            if color_s and color_q and color_s == color_q:
+                score += 1
+            if brand_s and brand_q and brand_s == brand_q:
+                score += 1
+
+            if score >= int(min_match_parts):
+                storage_path = f"{phone_number}/{filename}"
+                s3_uri = f"s3://{TRYON_CLOTHES_BUCKET}/{storage_path}"
+                description = f"{type_s}_{color_s}_{brand_s}".strip("_")
+                matches.append(
+                    {
+                        "description": description,
+                        "storage_path": storage_path,
+                        "s3_uri": s3_uri,
+                        "score": score,
+                    }
+                )
+
+        matches.sort(key=lambda x: x.get("score", 0), reverse=True)
+        matches = matches[: max(0, int(limit))]
+
+        storage = supabase.storage.from_(TRYON_CLOTHES_BUCKET)
+        for m in matches:
+            storage_path = m.get("storage_path")
+            if not storage_path:
+                continue
+            try:
+                res = storage.create_signed_url(storage_path, TRYON_SIGNED_URL_TTL_SECONDS)
+                signed = (res or {}).get("signedURL") or (res or {}).get("signedUrl")
+                if signed:
+                    m["supabase_url"] = signed
+            except Exception:
+                # If signed URL fails, still return the storage_path.
+                pass
+
+        return json.dumps(
+            {
+                "ok": True,
+                "phone_number": phone_number,
+                "bucket": TRYON_CLOTHES_BUCKET,
+                "query": {
+                    "garment_type": garment_type,
+                    "color": color_q,
+                    "brand": brand_q,
+                },
+                "total_matches": len(matches),
+                "matches": matches,
+            }
+        )
+
     except Exception as e:
         traceback.print_exc()
         return json.dumps({"ok": False, "error": str(e)})
