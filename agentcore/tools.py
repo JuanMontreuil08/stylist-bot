@@ -7,6 +7,7 @@ import requests
 from strands import tool
 from dotenv import load_dotenv
 from pydantic import BaseModel
+import unicodedata
 
 load_dotenv()
 
@@ -193,10 +194,13 @@ TRYON_SIGNED_URL_TTL_SECONDS = int(os.getenv("TRYON_SIGNED_URL_TTL_SECONDS", "36
 
 
 def _sanitize_garment_slug(description: str, max_len: int = 25) -> str:
-    """Turn garment description into a safe filename slug (lowercase, no spaces, limited length)."""
+    """Turn garment description into a safe filename slug (ASCII-only, lowercase, no spaces, limited length)."""
     if not (description or "").strip():
         return "prenda"
-    s = "".join(c if c.isalnum() or c in "-_" else " " for c in (description or "").strip())
+    # Normalize to ASCII (e.g. "selección" -> "seleccion")
+    s = unicodedata.normalize("NFKD", (description or "").strip())
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = "".join(c if c.isalnum() or c in "-_" else " " for c in s)
     s = "-".join(s.split()).lower()[:max_len].strip("-")
     return s or "prenda"
 
