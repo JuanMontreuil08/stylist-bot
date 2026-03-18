@@ -1,16 +1,24 @@
 """
 Kapso webhook: recibe mensaje, llama al agente, envía respuesta.
 Texto en un mensaje; si hay ruta S3, envía la imagen en mensaje aparte.
+Cuando el usuario envía una imagen, se sube al bucket raw de Supabase y se pasa al agente la URL estable + phone_number.
 """
 import re
 import os
+import uuid
 import httpx
+import requests
 import boto3
 from dotenv import load_dotenv
 from kapso.config import KAPSO_API_KEY, KAPSO_API_BASE, WHATSAPP_API_VERSION
 import traceback
 
 load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+TRYON_RAW_BUCKET = os.getenv("TRYON_RAW_BUCKET", "tryon-raw").strip()
+TRYON_SIGNED_URL_TTL = int(os.getenv("TRYON_SIGNED_URL_TTL_SECONDS", "3600"))
 
 # Regex: [s3://bucket/key] (con corchetes, como pide el system prompt) o s3://bucket/key
 # Incluir corchetes en el match para no dejar "[" o "]" sueltos en el texto
@@ -92,8 +100,36 @@ def process_webhook_payload(payload: dict, agent_fn, event: str = "whatsapp.mess
             _processed_message_ids.clear()
             _processed_message_ids.add(message_id)
 
-    agent_payload = {"prompt": text or ""}
+    phone_e164 = "+" + to if to and not to.startswith("+") else to
+    agent_payload = {"prompt": text or "", "phone_number": phone_e164}
+
     if image_url:
+        if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and TRYON_RAW_BUCKET:
+            try:
+                r = requests.get(image_url, timeout=30)
+                r.raise_for_status()
+                image_bytes = r.content
+                if image_bytes:
+                    from supabase import create_client  # type: ignore[import-not-found]
+                    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+                    ct = (r.headers.get("content-type") or "").lower()
+                    ext = "jpeg"
+                    if "png" in ct:
+                        ext = "png"
+                    elif "webp" in ct:
+                        ext = "webp"
+                    path = f"{phone_e164}/_incoming_{uuid.uuid4().hex[:12]}.{ext}"
+                    supabase.storage.from_(TRYON_RAW_BUCKET).upload(
+                        path, image_bytes, {"content-type": ct or "image/jpeg"}
+                    )
+                    res = supabase.storage.from_(TRYON_RAW_BUCKET).create_signed_url(
+                        path, TRYON_SIGNED_URL_TTL
+                    )
+                    signed = (res or {}).get("signedURL") or (res or {}).get("signedUrl")
+                    if signed:
+                        image_url = signed
+            except Exception as e:
+                print(f"[DEBUG] Upload to raw bucket failed, using Kapso URL: {e}")
         agent_payload["image_url"] = image_url
 
     try:

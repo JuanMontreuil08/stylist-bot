@@ -1,6 +1,7 @@
 import os
 import json
 import traceback
+import uuid
 import boto3
 import requests
 from strands import tool
@@ -187,7 +188,17 @@ VOICE_BOT_URL = os.getenv("VOICE_BOT_URL", "").rstrip("/")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 TRYON_INPUTS_BUCKET = os.getenv("TRYON_INPUTS_BUCKET", "tryon-inputs").strip()
+TRYON_CLOTHES_BUCKET = os.getenv("TRYON_CLOTHES_BUCKET", "tryon-clothes").strip()
 TRYON_SIGNED_URL_TTL_SECONDS = int(os.getenv("TRYON_SIGNED_URL_TTL_SECONDS", "3600"))
+
+
+def _sanitize_garment_slug(description: str, max_len: int = 25) -> str:
+    """Turn garment description into a safe filename slug (lowercase, no spaces, limited length)."""
+    if not (description or "").strip():
+        return "prenda"
+    s = "".join(c if c.isalnum() or c in "-_" else " " for c in (description or "").strip())
+    s = "-".join(s.split()).lower()[:max_len].strip("-")
+    return s or "prenda"
 
 
 @tool
@@ -316,3 +327,103 @@ def tryon_get_profile(phone_number: str) -> str:
         )
     except Exception as e:
         return json.dumps({"ok": False, "error": f"Failed to fetch try-on profile: {e}"})
+
+
+@tool
+def tryon_upload_photo(
+    phone_number: str,
+    image_url: str,
+    photo_type: str,
+    garment_description: str = "",
+) -> str:
+    """Save a try-on photo for the user. Call this when the user sends an image and you have classified it.
+
+    The image is stored in the bucket and table corresponding to the type:
+    - selfie → tryon-inputs bucket, profile selfie_path
+    - full_body → tryon-inputs bucket, profile full_body_path
+    - garment → tryon-clothes bucket, filename from garment_description (e.g. polo-negro_abc123.jpg)
+
+    Args:
+        phone_number: User phone in E.164 (e.g. +51995132783).
+        image_url: URL of the image (e.g. Supabase signed URL from raw bucket). Must be downloadable.
+        photo_type: One of "selfie", "full_body", "garment".
+        garment_description: Short description for garments only (e.g. "polo negro", "short beige"). Used to build the filename. Leave empty for selfie/full_body.
+
+    Returns:
+        Success message or error JSON.
+    """
+    phone_number = (phone_number or "").strip()
+    if not phone_number.startswith("+"):
+        phone_number = "+" + phone_number
+    image_url = (image_url or "").strip()
+    photo_type = (photo_type or "").strip().lower()
+    garment_description = (garment_description or "").strip()
+
+    if not image_url:
+        return json.dumps({"ok": False, "error": "image_url is required"})
+    if photo_type not in ("selfie", "full_body", "garment"):
+        return json.dumps({"ok": False, "error": f"photo_type must be selfie, full_body, or garment; got {photo_type!r}"})
+    if photo_type == "garment" and not garment_description:
+        return json.dumps({"ok": False, "error": "garment_description is required when photo_type is garment"})
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        return json.dumps({"ok": False, "error": "Supabase not configured"})
+
+    try:
+        r = requests.get(image_url, timeout=30)
+        r.raise_for_status()
+        image_bytes = r.content
+        if not image_bytes:
+            return json.dumps({"ok": False, "error": "Image download returned empty body"})
+
+        ct = (r.headers.get("content-type") or "").lower()
+        ext = "jpeg"
+        if "png" in ct:
+            ext = "png"
+        elif "webp" in ct:
+            ext = "webp"
+
+        from supabase import create_client  # type: ignore[import-not-found]
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+        if photo_type == "selfie":
+            path = f"{phone_number}/selfie.{ext}"
+            bucket = TRYON_INPUTS_BUCKET
+            supabase.storage.from_(bucket).upload(path, image_bytes, {"content-type": ct or "image/jpeg"})
+            row = {"phone_e164": phone_number, "selfie_path": path}
+            try:
+                supabase.table("tryon_profiles").upsert(row, on_conflict="phone_e164").execute()
+            except Exception:
+                try:
+                    supabase.table("tryon_profiles").upsert({**row, "user_id": phone_number}, on_conflict="user_id").execute()
+                except Exception:
+                    supabase.table("tryon_profiles").insert(row).execute()
+            return json.dumps({"ok": True, "message": "Selfie guardada correctamente.", "path": path})
+
+        if photo_type == "full_body":
+            path = f"{phone_number}/full_body.{ext}"
+            bucket = TRYON_INPUTS_BUCKET
+            supabase.storage.from_(bucket).upload(path, image_bytes, {"content-type": ct or "image/jpeg"})
+            row = {"phone_e164": phone_number, "full_body_path": path}
+            try:
+                supabase.table("tryon_profiles").upsert(row, on_conflict="phone_e164").execute()
+            except Exception:
+                try:
+                    supabase.table("tryon_profiles").upsert({**row, "user_id": phone_number}, on_conflict="user_id").execute()
+                except Exception:
+                    supabase.table("tryon_profiles").insert(row).execute()
+            return json.dumps({"ok": True, "message": "Foto full body guardada correctamente.", "path": path})
+
+        # garment
+        slug = _sanitize_garment_slug(garment_description)
+        uid = uuid.uuid4().hex[:12]
+        path = f"{phone_number}/{slug}_{uid}.{ext}"
+        bucket = TRYON_CLOTHES_BUCKET
+        supabase.storage.from_(bucket).upload(path, image_bytes, {"content-type": ct or "image/jpeg"})
+        return json.dumps({"ok": True, "message": f"Prenda guardada: {slug}.", "path": path})
+
+    except requests.RequestException as e:
+        return json.dumps({"ok": False, "error": f"Failed to download image: {e}"})
+    except Exception as e:
+        traceback.print_exc()
+        return json.dumps({"ok": False, "error": str(e)})

@@ -8,7 +8,7 @@ from strands import Agent, tool
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from strands.models import BedrockModel
 from dotenv import load_dotenv
-from agentcore.tools import search_clothing_catalog, search_products_online, initiate_voice_call, tryon_get_profile
+from agentcore.tools import search_clothing_catalog, search_products_online, initiate_voice_call, tryon_get_profile, tryon_upload_photo
 from utils.handle_kapso_image import convert_kapso_image_to_bytes
 load_dotenv()
 
@@ -36,16 +36,18 @@ model = BedrockModel(
 agent = Agent(
     model=model,
     system_prompt=SYSTEM_PROMPT,
-    tools=[search_clothing_catalog, search_products_online, initiate_voice_call, tryon_get_profile]
+    tools=[search_clothing_catalog, search_products_online, initiate_voice_call, tryon_get_profile, tryon_upload_photo]
 )
 
 @app.entrypoint
 def strands_agent_bedrock(payload):
     """
-    Invoke the agent with a payload. Supports prompt (text) and optional image_url.
+    Invoke the agent with a payload. Supports prompt (text), optional image_url and phone_number.
+    When there is an image, the agent should classify it and call tryon_upload_photo with the provided phone_number and image_url.
     """
     image_url = payload.get("image_url")
-    print("[strands_agent_bedrock] image_url:", image_url)
+    phone_number = (payload.get("phone_number") or "").strip() or None
+    print("[strands_agent_bedrock] image_url:", (image_url[:80] + "..." if image_url and len(image_url) > 80 else image_url))
     prompt = (payload.get("prompt") or "").strip()
 
     if image_url:
@@ -54,6 +56,12 @@ def strands_agent_bedrock(payload):
         except Exception:
             return "Cannot load image. Try again."
         content = []
+        instruction = (
+            "El usuario envió esta imagen. Clasifícala en exactamente una categoría: selfie, full_body o garment. "
+            "Si es garment, escribe una descripción corta (ej: polo negro, short beige). "
+            "Luego llama tryon_upload_photo con phone_number=%r, image_url=%r, photo_type=<tu clasificación>, garment_description=<solo si es garment, si no \"\">."
+        ) % (phone_number or "", image_url)
+        content.append({"text": instruction})
         if prompt:
             content.append({"text": prompt})
         content.append({
@@ -62,8 +70,6 @@ def strands_agent_bedrock(payload):
                 "source": {"bytes": img_bytes}
             }
         })
-        if not content or (len(content) == 1 and "image" in content[0]):
-            content.insert(0, {"text": "¿What do you see in this image?"})
         response = agent(content)
     else:
         user_input = prompt or ""
