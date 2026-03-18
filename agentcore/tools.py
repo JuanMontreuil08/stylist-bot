@@ -456,6 +456,18 @@ def tryon_generate(
     - `s3://bucket/key` (from the catalog)
     - `https://...` (Supabase signed URLs, or public S3 URLs)
     """
+    
+    creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    creds_path = "/tmp/service_account.json"
+    
+    if creds_json:
+        # Forzamos la creación del archivo por si el comando de Bash falló
+        with open(creds_path, "w") as f:
+            f.write(creds_json)
+        # Forzamos a que Google busque este archivo
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+
+
     phone_number = (phone_number or "").strip()
     if not phone_number:
         return json.dumps({"ok": False, "error": "phone_number is required"})
@@ -638,7 +650,14 @@ def tryon_search_garments(
             color_s = _predominant_color(color_combined)
 
             score = 0
+            # MVP (pragmatic): treat "camiseta" as "polo" during search for polos.
+            type_match = False
             if type_s == garment_type:
+                type_match = True
+            elif garment_type == "polo" and type_s == "camiseta":
+                type_match = True
+
+            if type_match:
                 score += 1
             if color_s and color_q and color_s == color_q:
                 score += 1
@@ -648,7 +667,10 @@ def tryon_search_garments(
             if score >= int(min_match_parts):
                 storage_path = f"{phone_number}/{filename}"
                 s3_uri = f"s3://{TRYON_CLOTHES_BUCKET}/{storage_path}"
-                description = f"{type_s}_{color_s}_{brand_s}".strip("_")
+                display_type = type_s
+                if garment_type == "polo" and type_s == "camiseta":
+                    display_type = "polo"
+                description = f"{display_type}_{color_s}_{brand_s}".strip("_")
                 matches.append(
                     {
                         "description": description,
