@@ -389,7 +389,8 @@ def tryon_upload_photo(
         if photo_type == "selfie":
             path = f"{phone_number}/selfie.{ext}"
             bucket = TRYON_INPUTS_BUCKET
-            supabase.storage.from_(bucket).upload(path, image_bytes, {"content-type": ct or "image/jpeg"})
+            file_opts = {"content-type": ct or "image/jpeg", "upsert": "true"}
+            supabase.storage.from_(bucket).upload(path, image_bytes, file_opts)
             row = {"phone_e164": phone_number, "selfie_path": path}
             try:
                 supabase.table("tryon_profiles").upsert(row, on_conflict="phone_e164").execute()
@@ -398,12 +399,13 @@ def tryon_upload_photo(
                     supabase.table("tryon_profiles").upsert({**row, "user_id": phone_number}, on_conflict="user_id").execute()
                 except Exception:
                     supabase.table("tryon_profiles").insert(row).execute()
-            return json.dumps({"ok": True, "message": "Selfie guardada correctamente.", "path": path})
+            return json.dumps({"ok": True, "message": "Selfie guardada correctamente. Si ya tenías una, se actualizó.", "path": path})
 
         if photo_type == "full_body":
             path = f"{phone_number}/full_body.{ext}"
             bucket = TRYON_INPUTS_BUCKET
-            supabase.storage.from_(bucket).upload(path, image_bytes, {"content-type": ct or "image/jpeg"})
+            file_opts = {"content-type": ct or "image/jpeg", "upsert": "true"}
+            supabase.storage.from_(bucket).upload(path, image_bytes, file_opts)
             row = {"phone_e164": phone_number, "full_body_path": path}
             try:
                 supabase.table("tryon_profiles").upsert(row, on_conflict="phone_e164").execute()
@@ -412,7 +414,7 @@ def tryon_upload_photo(
                     supabase.table("tryon_profiles").upsert({**row, "user_id": phone_number}, on_conflict="user_id").execute()
                 except Exception:
                     supabase.table("tryon_profiles").insert(row).execute()
-            return json.dumps({"ok": True, "message": "Foto full body guardada correctamente.", "path": path})
+            return json.dumps({"ok": True, "message": "Foto full body guardada correctamente. Si ya tenías una, se actualizó.", "path": path})
 
         # garment
         slug = _sanitize_garment_slug(garment_description)
