@@ -468,6 +468,56 @@ def tryon_generate(
         return json.dumps({"ok": False, "error": f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}"})
 
     try:
+        if not phone_number.startswith("+"):
+            phone_number = "+" + phone_number
+
+        # Re-sign selfie/full_body inside the tool to avoid InvalidJWT caused by
+        # long signed URLs being "transported" through the LLM.
+        selfie_storage_url = None
+        full_body_storage_url = None
+
+        if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+            return json.dumps({"ok": False, "error": "Supabase not configured"})
+
+        from supabase import create_client  # type: ignore[import-not-found]
+
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        profile_row = None
+        for col in ("phone_e164", "user_id"):
+            try:
+                resp = (
+                    supabase.table("tryon_profiles")
+                    .select("selfie_path,full_body_path")
+                    .eq(col, phone_number)
+                    .limit(1)
+                    .execute()
+                )
+                rows = getattr(resp, "data", None) or []
+                if rows:
+                    profile_row = rows[0]
+                    break
+            except Exception:
+                continue
+
+        if profile_row:
+            selfie_db_path = (profile_row.get("selfie_path") or "").strip() or None
+            full_body_db_path = (profile_row.get("full_body_path") or "").strip() or None
+
+            storage = supabase.storage.from_(TRYON_INPUTS_BUCKET)
+            if selfie_db_path:
+                res = storage.create_signed_url(selfie_db_path, TRYON_SIGNED_URL_TTL_SECONDS)
+                selfie_storage_url = (res or {}).get("signedURL") or (res or {}).get("signedUrl")
+
+            if full_body_db_path:
+                res = storage.create_signed_url(full_body_db_path, TRYON_SIGNED_URL_TTL_SECONDS)
+                full_body_storage_url = (res or {}).get("signedURL") or (res or {}).get("signedUrl")
+
+        # Fallback: use incoming URLs only if we couldn't re-sign from profile.
+        if not selfie_storage_url and selfie_url:
+            selfie_storage_url = selfie_url
+        if not full_body_storage_url and full_body_url:
+            full_body_storage_url = full_body_url
+
         def _to_download_url(url: str) -> str:
             url = (url or "").strip()
             if url.startswith("s3://"):
@@ -503,8 +553,18 @@ def tryon_generate(
 
         clothes_paths: list[str] = []
 
-        selfie_path = _download_to_temp_image(selfie_url, "selfie")
-        full_body_path = _download_to_temp_image(full_body_url, "full_body")
+        missing = []
+        if not selfie_storage_url:
+            missing.append("selfie")
+        if not full_body_storage_url:
+            missing.append("full_body")
+        if missing:
+            return json.dumps(
+                {"ok": False, "error": f"Missing required profile photos in tryon_profiles: {', '.join(missing)}"}
+            )
+
+        selfie_path = _download_to_temp_image(selfie_storage_url, "selfie")
+        full_body_path = _download_to_temp_image(full_body_storage_url, "full_body")
 
         polo_url = (polo_url or "").strip()
         pantalon_url = (pantalon_url or "").strip()
