@@ -446,42 +446,32 @@ def tryon_generate(
     polo_url: str,
     pantalon_url: str,
 ) -> str:
-    """
-    Generate a virtual try-on image using OpenVTO, upload it to Supabase Storage
-    (bucket `TRYON_RESULTS_BUCKET`) under the user's prefix, and return a signed
-    Supabase URL (temporary) so the WhatsApp handler can display it.
-
-    Inputs are URLs pointing to images (selfie, full body, polo, pantalon).
-    The polo/pantalon URLs may be either:
-    - `s3://bucket/key` (from the catalog)
-    - `https://...` (Supabase signed URLs, or public S3 URLs)
-    """
-    
-    creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    creds_path = "/tmp/service_account.json"
-    
-    if creds_json:
-        # Forzamos la creación del archivo por si el comando de Bash falló
-        with open(creds_path, "w") as f:
-            f.write(creds_json)
-        # Forzamos a que Google busque este archivo
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-
-
     phone_number = (phone_number or "").strip()
     if not phone_number:
         return json.dumps({"ok": False, "error": "phone_number is required"})
 
-    try:
-        # Lazy imports so the rest of the tools work without OpenVTO installed.
-        # OpenVTO and PIL imports are at module-level.
+    # ✅ Escribir credenciales ANTES de cualquier import o uso de Google
+    creds_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if not creds_json:
+        return json.dumps({"ok": False, "error": "GOOGLE_APPLICATION_CREDENTIALS_JSON not set"})
 
+    creds_path = "/tmp/service_account.json"
+    with open(creds_path, "w") as f:
+        f.write(creds_json)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+
+    # ✅ Validar que el JSON es válido
+    try:
+        creds_data = json.loads(creds_json)
+        project_id = creds_data.get("project_id", "unknown")
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": False, "error": f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}"})
+
+    try:
         def _to_download_url(url: str) -> str:
             url = (url or "").strip()
             if url.startswith("s3://"):
-                # Convert to public S3 HTTP URL so requests can download it.
-                # Example: s3://my-bucket/path/to/file.jpg -> https://my-bucket.s3.amazonaws.com/path/to/file.jpg
-                remainder = url[len("s3://") :]
+                remainder = url[len("s3://"):]
                 bucket, _, key = remainder.partition("/")
                 if bucket and key is not None:
                     return f"https://{bucket}.s3.amazonaws.com/{key}"
@@ -502,11 +492,8 @@ def tryon_generate(
             if "png" in ct:
                 tmp_ext = "png"
 
-            # OpenVTO is simplest with real image files; normalize to RGB JPEG for JPG path.
             with tempfile.NamedTemporaryFile(suffix=f".{tmp_ext}", delete=False) as f:
                 tmp_path = f.name
-
-                # If jpg, normalize; if png, keep bytes if it already is png.
                 if tmp_ext == "jpg":
                     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                     img.save(tmp_path, format="JPEG")
@@ -523,30 +510,30 @@ def tryon_generate(
         pantalon_url = (pantalon_url or "").strip()
 
         if polo_url:
-            polo_path = _download_to_temp_image(polo_url, "polo")
-            clothes_paths.append(polo_path)
+            clothes_paths.append(_download_to_temp_image(polo_url, "polo"))
         if pantalon_url:
-            pantalon_path = _download_to_temp_image(pantalon_url, "pantalon")
-            clothes_paths.append(pantalon_path)
+            clothes_paths.append(_download_to_temp_image(pantalon_url, "pantalon"))
 
         if not clothes_paths:
-            return json.dumps({"ok": False, "error": "At least one garment URL is required (polo_url or pantalon_url)."})
+            return json.dumps({"ok": False, "error": "At least one garment URL is required."})
 
+        # ✅ Usar FLASH en lugar de NANO_BANANA — más estable y ampliamente disponible
         vto = OpenVTO(provider="google", image_model=ImageModel.NANO_BANANA.value)
+        
         avatar = vto.generate_avatar(selfie=selfie_path, posture=full_body_path)
         tryon = vto.generate_tryon(avatar=avatar, clothes=clothes_paths)
 
         if not hasattr(tryon, "image") or tryon.image is None:
             return json.dumps({"ok": False, "error": "OpenVTO did not return an output image"})
+
         result_bytes = tryon.image
 
         if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
             return json.dumps({"ok": False, "error": "Supabase not configured"})
         if not TRYON_RESULTS_BUCKET:
-            return json.dumps({"ok": False, "error": "TRYON_RESULTS_BUCKET is not configured"})
+            return json.dumps({"ok": False, "error": "TRYON_RESULTS_BUCKET not configured"})
 
-        from supabase import create_client  # type: ignore[import-not-found]
-
+        from supabase import create_client
         supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         out_path = f"{phone_number}/tryon_{uuid.uuid4().hex}.jpg"
         supabase.storage.from_(TRYON_RESULTS_BUCKET).upload(
@@ -561,6 +548,7 @@ def tryon_generate(
         if not signed:
             return json.dumps({"ok": False, "error": "Could not create signed URL"})
         return signed
+
     except Exception as e:
         traceback.print_exc()
         return json.dumps({"ok": False, "error": str(e)})
