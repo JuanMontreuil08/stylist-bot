@@ -146,6 +146,8 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
 def search_clothing_catalog(query: str) -> str:
     """Search the internal clothing catalog using AI-powered semantic search. Returns clothing items with detailed metadata (type, colors, style, formality, occasion, etc.) and image URLs from our curated collection."""
     print("[search_clothing_catalog] query:", repr(query))
+    from agentcore.context import send_search_ack
+    send_search_ack()
     
     try:
         response = bedrock_agent.retrieve(
@@ -204,6 +206,10 @@ def search_products_online(query: str, user_context: str | None = None) -> str:
     if not api_key:
         return "Online product search is not configured (missing PERPLEXITY_API_KEY). I can only search our clothing catalog."
     print("[search_products_online] query:", repr(query), "context:", repr(user_context))
+
+    from agentcore.context import send_search_ack
+    send_search_ack()
+
     return _call_perplexity_product_search(query, user_context, api_key)
 
 

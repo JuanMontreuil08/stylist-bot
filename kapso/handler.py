@@ -191,26 +191,18 @@ def process_webhook_payload(payload: dict, agent_fn, event: str = "whatsapp.mess
                 print(f"[DEBUG] Upload to raw bucket failed, using Kapso URL: {e}")
         agent_payload["image_url"] = image_url
 
-    # Send a quick acknowledgment so the user knows the bot is working
-    # (important for Perplexity queries that can take 10–20s)
-    _ack_base = f"{KAPSO_API_BASE}/meta/whatsapp/{WHATSAPP_API_VERSION}/{phone_number_id}/messages"
-    _ack_headers = {"Content-Type": "application/json", "X-API-Key": KAPSO_API_KEY}
-    try:
-        httpx.post(
-            _ack_base,
-            json={"messaging_product": "whatsapp", "to": to, "type": "text",
-                  "text": {"body": "Buscando las mejores opciones para ti... 🔍"}},
-            headers=_ack_headers,
-            timeout=5.0,
-        )
-    except Exception:
-        pass  # ack failure must never block the main reply
+    # Set WhatsApp context so search_products_online can send its own ack
+    # only when it actually runs (not for conversational replies)
+    from agentcore.context import set_whatsapp_context, clear_whatsapp_context
+    set_whatsapp_context(phone_number_id, to)
 
     try:
         reply = agent_fn(agent_payload)
     except Exception:
         traceback.print_exc()
         reply = "Hubo un error. Intenta de nuevo."
+    finally:
+        clear_whatsapp_context()
     if reply is None:
         reply = "No pude generar una respuesta."
     reply = str(reply).strip()
