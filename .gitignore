@@ -73,3 +73,7 @@ keys/
 
 # --- gitignore ---
 .gitignore
+
+# --- Claude ---
+.claude/
+CLAUDE.md

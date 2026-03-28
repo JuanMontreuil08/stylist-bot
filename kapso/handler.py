@@ -90,8 +90,25 @@ def process_webhook_payload(payload: dict, agent_fn, event: str = "whatsapp.mess
     if message_id and message_id in _processed_message_ids:
         return
 
+    # Extract text — also handle interactive reply payloads (button_reply / list_reply)
     text = (msg.get("text") or {}).get("body") or (msg.get("kapso") or {}).get("content") or ""
     text = (text or "").strip()
+
+    interactive_id: str | None = None
+    if msg.get("type") == "interactive":
+        interactive = msg.get("interactive") or {}
+        int_type = interactive.get("type")
+        if int_type == "button_reply":
+            br = interactive.get("button_reply") or {}
+            interactive_id = br.get("id")
+            if not text:
+                text = br.get("title") or ""
+        elif int_type == "list_reply":
+            lr = interactive.get("list_reply") or {}
+            interactive_id = lr.get("id")
+            if not text:
+                text = lr.get("title") or ""
+
     image_url = (msg.get("type") == "image" and (msg.get("image") or {}).get("link")) or None
     if not text and not image_url:
         return
@@ -108,7 +125,42 @@ def process_webhook_payload(payload: dict, agent_fn, event: str = "whatsapp.mess
             _processed_message_ids.add(message_id)
 
     phone_e164 = "+" + to if to and not to.startswith("+") else to
+
+    # ── Onboarding: intercept new users before they reach the agent ────────────
+    from kapso.onboarding import needs_onboarding, process_onboarding, get_profile
+    if needs_onboarding(phone_e164):
+        process_onboarding(phone_e164, phone_number_id, to, text, interactive_id)
+        return
+
     agent_payload = {"prompt": text or "", "phone_number": phone_e164}
+
+    # ── Inject user profile into prompt so agent personalizes every reply ──────
+    try:
+        profile = get_profile(phone_e164)
+        if profile:
+            name    = profile.get("name") or ""
+            gender  = profile.get("gender") or ""
+            style   = ", ".join(profile.get("style_tags") or [])
+            sizes   = profile.get("sizes_text") or ""
+            budget  = profile.get("budget_range") or ""
+            colors  = ", ".join(profile.get("favorite_colors") or [])
+            brands  = ", ".join(profile.get("favorite_brands") or [])
+            city    = profile.get("city") or ""
+            profile_ctx = (
+                f"[Perfil del usuario — phone: {phone_e164}"
+                + (f", nombre: {name}" if name else "")
+                + (f", género: {gender}" if gender else "")
+                + (f", estilo: {style}" if style else "")
+                + (f", tallas: {sizes}" if sizes else "")
+                + (f", presupuesto: {budget}" if budget else "")
+                + (f", colores favoritos: {colors}" if colors else "")
+                + (f", marcas favoritas: {brands}" if brands else "")
+                + (f", ciudad: {city}" if city else "")
+                + "]\n\n"
+            )
+            agent_payload["prompt"] = profile_ctx + (agent_payload.get("prompt") or "")
+    except Exception as e:
+        print(f"[handler] profile injection error (ignored): {e}")
 
     if image_url:
         if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY and TRYON_RAW_BUCKET:
@@ -138,6 +190,21 @@ def process_webhook_payload(payload: dict, agent_fn, event: str = "whatsapp.mess
             except Exception as e:
                 print(f"[DEBUG] Upload to raw bucket failed, using Kapso URL: {e}")
         agent_payload["image_url"] = image_url
+
+    # Send a quick acknowledgment so the user knows the bot is working
+    # (important for Perplexity queries that can take 10–20s)
+    _ack_base = f"{KAPSO_API_BASE}/meta/whatsapp/{WHATSAPP_API_VERSION}/{phone_number_id}/messages"
+    _ack_headers = {"Content-Type": "application/json", "X-API-Key": KAPSO_API_KEY}
+    try:
+        httpx.post(
+            _ack_base,
+            json={"messaging_product": "whatsapp", "to": to, "type": "text",
+                  "text": {"body": "Buscando las mejores opciones para ti... 🔍"}},
+            headers=_ack_headers,
+            timeout=5.0,
+        )
+    except Exception:
+        pass  # ack failure must never block the main reply
 
     try:
         reply = agent_fn(agent_payload)

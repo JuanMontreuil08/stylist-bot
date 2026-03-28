@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from agentcore.tools import (
     search_clothing_catalog,
     search_products_online,
+    update_user_profile,
     initiate_voice_call,
     tryon_get_profile,
     tryon_upload_photo,
@@ -18,6 +19,7 @@ from agentcore.tools import (
     tryon_generate,
 )
 from utils.handle_kapso_image import convert_kapso_image_to_bytes
+from agentcore.memory import make_session_manager
 load_dotenv()
 
 
@@ -41,19 +43,38 @@ model_id = "us.anthropic.claude-sonnet-4-6"
 model = BedrockModel(
     model_id=model_id,
 )
-agent = Agent(
-    model=model,
-    system_prompt=SYSTEM_PROMPT,
-    tools=[
-        search_clothing_catalog,
-        search_products_online,
-        initiate_voice_call,
-        tryon_get_profile,
-        tryon_upload_photo,
-        tryon_search_garments,
-        tryon_generate,
-    ],
-)
+_AGENT_TOOLS = [
+    search_clothing_catalog,
+    search_products_online,
+    update_user_profile,
+    initiate_voice_call,
+    tryon_get_profile,
+    tryon_upload_photo,
+    tryon_search_garments,
+    tryon_generate,
+]
+
+# Per-user agent registry: phone_number → Agent instance.
+# Each agent owns its own agent.messages list, so conversation history is
+# fully isolated between users. History resets on server restart (acceptable
+# for MVP — upgrade to AgentCoreMemorySessionManager for persistence at scale).
+_user_agents: dict[str, Agent] = {}
+
+
+def _get_agent(phone_number: str) -> Agent:
+    """Return the Agent for this user, creating one on first contact."""
+    if phone_number not in _user_agents:
+        session_manager = make_session_manager(phone_number)
+        _user_agents[phone_number] = Agent(
+            model=model,
+            system_prompt=SYSTEM_PROMPT,
+            tools=_AGENT_TOOLS,
+            session_manager=session_manager,
+        )
+        backend = "Bedrock AgentCore Memory" if session_manager else "in-process (no persistence)"
+        print(f"[agent] new session for {phone_number} — memory: {backend} (total active: {len(_user_agents)})")
+    return _user_agents[phone_number]
+
 
 @app.entrypoint
 def strands_agent_bedrock(payload):
@@ -62,9 +83,11 @@ def strands_agent_bedrock(payload):
     When there is an image, the agent should classify it and call tryon_upload_photo with the provided phone_number and image_url.
     """
     image_url = payload.get("image_url")
-    phone_number = (payload.get("phone_number") or "").strip() or None
+    phone_number = (payload.get("phone_number") or "").strip() or "unknown"
     print("[strands_agent_bedrock] image_url:", (image_url[:80] + "..." if image_url and len(image_url) > 80 else image_url))
     prompt = (payload.get("prompt") or "").strip()
+
+    agent = _get_agent(phone_number)
 
     if image_url:
         try:
@@ -80,7 +103,7 @@ def strands_agent_bedrock(payload):
             "The <brand> must be the brand if recognized; otherwise use 'marca_desconocida'. "
             "Examples: polo_rojo_lacoste, pantalon_beige_zara, camiseta_azul_nike. "
             "Then call tryon_upload_photo with phone_number=%r, image_url=%r, photo_type=<your classification>, garment_description=<only if garment; otherwise \"\">."
-        ) % (phone_number or "", image_url)
+        ) % (phone_number, image_url)
         content.append({"text": instruction})
         if prompt:
             content.append({"text": prompt})
@@ -93,7 +116,7 @@ def strands_agent_bedrock(payload):
         response = agent(content)
     else:
         user_input = prompt or ""
-        print("User input:", user_input)
+        print(f"[agent] user={phone_number} messages_in_history={len(agent.messages)} input={user_input[:80]}")
         response = agent(user_input)
 
     return response.message["content"][0]["text"]

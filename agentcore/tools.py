@@ -47,15 +47,28 @@ class _OnlineProductSearchResult(BaseModel):
     general_tips: list[str] | None = None
 
 
+import re as _re
+
+def _strip_citation_markers(text: str) -> str:
+    """Remove Perplexity inline citation markers like [1], [2][3] from text."""
+    return _re.sub(r"\[\d+\]", "", text).strip()
+
+
 def _call_perplexity_product_search(query: str, user_context: str | None, api_key: str) -> str:
     """Call Perplexity Sonar for general product search; returns a plain-text summary for the agent."""
     system_prompt = (
         "You are a helpful shopping advisor. The user is asking for product recommendations or research. "
         "Search the web for relevant products, reviews, and comparisons. "
         "Your response MUST be a JSON object with the exact schema provided. "
-        "For each recommendation include: product_name, a short summary, pros, cons, estimated_price_range when possible, and cited_sources with at least one url per product (url is required; title and snippet optional). "
+        "Always return between 3 and 5 product recommendations. "
+        "For each recommendation include: product_name, a short summary, pros, cons, estimated_price_range when possible, "
+        "and cited_sources with 1-2 direct product or shop page URLs (e.g. e-commerce listings, brand stores). "
+        "Avoid citing YouTube videos, blog posts, or editorial articles as sources — only use pages where the product can actually be purchased. "
+        "Always use full, direct product URLs. Never use URL shorteners, redirect links, or link trackers (e.g. shein.top/xxx is not acceptable — use the full shein.com URL instead). "
+        "Each cited_sources URL must point to a specific product or product listing page, not a generic category or home page. Do not repeat the same URL across multiple products. "
+        "If the user specifies a budget, do NOT recommend products whose price exceeds that budget. If no in-budget option exists, say so clearly and suggest the closest affordable alternative. "
         "In the 'comparison' field write a short paragraph comparing the options: who should choose which product, main tradeoffs, and when to pick one over another. "
-        "Keep recommendations actionable and concise. Cite sources for key claims. "
+        "Keep recommendations actionable and concise. "
         "If the user provides extra context (budget, preferences, location), take it into account."
     )
     context_line = f" Additional context from the user: {user_context}." if user_context else ""
@@ -71,6 +84,7 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
         "search_language_filter": ["es"],
         "response_format": {"type": "json_schema", "json_schema": schema_payload},
         "temperature": 0.5,
+        "search_context_size": "medium",
         "web_search_options": {
             "user_location": {"country": "PE"},
         },
@@ -85,7 +99,8 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
         response = requests.post(PERPLEXITY_API_URL, headers=headers, json=payload, timeout=60)
         response.raise_for_status()
         data = response.json()
-        print(data)
+        usage = data.get("usage", {})
+        print(f"[search_products_online] tokens={usage.get('total_tokens')} cost={usage.get('cost', {}).get('total_cost')}")
         raw_content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         if not raw_content:
             return "No response from search."
@@ -104,25 +119,27 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
         return f"Could not parse search results: {e}"
 
     # Build a clear summary so the agent can relay it with pros, cons, and exact URLs
-    parts = [result.overall_summary.strip(), ""]
+    parts = [_strip_citation_markers(result.overall_summary), ""]
     for i, rec in enumerate(result.recommendations[:5], 1):
         parts.append(f"--- Producto {i}: {rec.product_name} ---")
-        parts.append(rec.summary)
+        parts.append(_strip_citation_markers(rec.summary))
         if rec.pros:
-            parts.append("Pros: " + "; ".join(rec.pros[:5]))
+            parts.append("Pros: " + "; ".join(_strip_citation_markers(p) for p in rec.pros[:5]))
         if rec.cons:
-            parts.append("Contras: " + "; ".join(rec.cons[:3]))
+            parts.append("Contras: " + "; ".join(_strip_citation_markers(c) for c in rec.cons[:3]))
         if rec.estimated_price_range:
             parts.append(f"Precio aprox: {rec.estimated_price_range}")
-        if rec.cited_sources:
-            url = rec.cited_sources[0].url.strip()
-            parts.append(f"Link (copiar exacto): {url}")
+        # Show up to 2 purchase links per product
+        shop_sources = [s for s in rec.cited_sources if s.url.strip()][:2]
+        for j, src in enumerate(shop_sources, 1):
+            label = "Link" if len(shop_sources) == 1 else f"Link {j}"
+            parts.append(f"{label} (copiar exacto): {src.url.strip()}")
         parts.append("")
     if result.comparison and result.comparison.strip():
-        comp = result.comparison.strip().replace("**", "")  # remove markdown for plain WhatsApp
+        comp = _strip_citation_markers(result.comparison).replace("**", "")
         parts.append("Comparación entre opciones: " + comp)
     if result.general_tips:
-        parts.append("\nTips: " + " | ".join(result.general_tips[:3]))
+        parts.append("\nTips: " + " | ".join(_strip_citation_markers(t) for t in result.general_tips[:3]))
     return "\n".join(parts).strip()
 
 @tool
@@ -188,6 +205,60 @@ def search_products_online(query: str, user_context: str | None = None) -> str:
         return "Online product search is not configured (missing PERPLEXITY_API_KEY). I can only search our clothing catalog."
     print("[search_products_online] query:", repr(query), "context:", repr(user_context))
     return _call_perplexity_product_search(query, user_context, api_key)
+
+
+_SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+_SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+# Array fields in user_profiles that accept comma-separated values
+_ARRAY_FIELDS = {"style_tags", "favorite_colors", "favorite_brands"}
+# All updatable fields
+_PROFILE_FIELDS = {
+    "name", "gender", "style_tags", "sizes_text",
+    "budget_range", "favorite_colors", "favorite_brands", "city",
+}
+
+
+@tool
+def update_user_profile(phone_number: str, field: str, value: str) -> str:
+    """Update a field in the user's style profile. Call this when the user mentions a preference,
+    size change, new brand, budget update, or any personal detail worth remembering.
+
+    Args:
+        phone_number: User's phone in E.164 format (e.g. +51995132783).
+        field: Field to update. One of: name, gender, style_tags, sizes_text, budget_range,
+               favorite_colors, favorite_brands, city.
+        value: New value as a plain string. For array fields (style_tags, favorite_colors,
+               favorite_brands) use comma-separated values, e.g. "casual, deportivo".
+    """
+    phone_number = (phone_number or "").strip()
+    if not phone_number.startswith("+"):
+        phone_number = "+" + phone_number
+    field = (field or "").strip().lower()
+    value = (value or "").strip()
+
+    if field not in _PROFILE_FIELDS:
+        return f"Unknown field '{field}'. Valid fields: {', '.join(sorted(_PROFILE_FIELDS))}"
+    if not value:
+        return "value cannot be empty."
+    if not _SUPABASE_URL or not _SUPABASE_KEY:
+        return "Profile storage not configured."
+
+    try:
+        from supabase import create_client
+        sb = create_client(_SUPABASE_URL, _SUPABASE_KEY)
+        parsed_value: list[str] | str
+        if field in _ARRAY_FIELDS:
+            parsed_value = [v.strip() for v in value.split(",") if v.strip()]
+        else:
+            parsed_value = value
+        sb.table("user_profiles").upsert(
+            {"user_id": phone_number, field: parsed_value},
+            on_conflict="user_id",
+        ).execute()
+        return f"Profile updated: {field} = {parsed_value}"
+    except Exception as e:
+        return f"Could not update profile: {e}"
 
 
 VOICE_BOT_URL = os.getenv("VOICE_BOT_URL", "").rstrip("/")
@@ -463,7 +534,7 @@ def tryon_generate(
     # ✅ Validar que el JSON es válido
     try:
         creds_data = json.loads(creds_json)
-        project_id = creds_data.get("project_id", "unknown")
+        print(f"[tryon_generate] GCP project: {creds_data.get('project_id', 'unknown')}")
     except json.JSONDecodeError as e:
         return json.dumps({"ok": False, "error": f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}"})
 
