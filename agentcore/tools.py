@@ -137,7 +137,7 @@ def search_products_online(query: str, user_context: str | None = None) -> str:
 
     Args:
         query: The main search question in ENGLISH (e.g. "gray north face men's jacket", "moisturizing cream dry skin", "bomber style jacket"). Product/category and style only.
-        user_context: Optional. Extra constraints the user explicitly mentioned in this message (e.g. "budget 100 USD", "slim fit", "for the gym"). Leave None if they said nothing specific.
+        user_context: Optional. Brief context in ENGLISH (1 line) from the user profile. Include: gender, size (S/M/L/XL), and style. Example: "men size M casual". Do NOT include budget, use cases, colors, brands, or overly specific details. Leave None if no profile context exists.
 
     Returns real product listings from Google Shopping with verified prices and URLs. Do not use for clothing we may have—use search_clothing_catalog first for that."""
     api_key = os.getenv("SERPAPI_KEY")
