@@ -25,19 +25,13 @@ PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "sonar")
 
 
-class _ProductSource(BaseModel):
-    title: str | None = None
-    url: str
-    snippet: str | None = None
-
-
 class _ProductRecommendation(BaseModel):
     product_name: str
     summary: str
     pros: list[str]
     cons: list[str]
     estimated_price_range: str | None = None
-    cited_sources: list[_ProductSource]
+    where_to_buy: str | None = None  # brand/store name only, no URL
 
 
 class _OnlineProductSearchResult(BaseModel):
@@ -62,10 +56,8 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
         "Your response MUST be a JSON object with the exact schema provided. "
         "Always return between 3 and 5 product recommendations. "
         "For each recommendation include: product_name, a short summary, pros, cons, estimated_price_range when possible, "
-        "and cited_sources with 1-2 direct product or shop page URLs (e.g. e-commerce listings, brand stores). "
-        "Avoid citing YouTube videos, blog posts, or editorial articles as sources — only use pages where the product can actually be purchased. "
-        "Always use full, direct product URLs. Never use URL shorteners, redirect links, or link trackers (e.g. shein.top/xxx is not acceptable — use the full shein.com URL instead). "
-        "Each cited_sources URL must point to a specific product or product listing page, not a generic category or home page. Do not repeat the same URL across multiple products. "
+        "and where_to_buy (store or brand name only, e.g. 'Ripley', 'Amazon', 'Nike.com' — do NOT include any URL). "
+        "Do NOT generate or invent any URLs. "
         "If the user specifies a budget, do NOT recommend products whose price exceeds that budget. If no in-budget option exists, say so clearly and suggest the closest affordable alternative. "
         "In the 'comparison' field write a short paragraph comparing the options: who should choose which product, main tradeoffs, and when to pick one over another. "
         "Keep recommendations actionable and concise. "
@@ -105,6 +97,7 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
         if not raw_content:
             return "No response from search."
         result = _OnlineProductSearchResult.model_validate_json(raw_content)
+
     except requests.exceptions.Timeout:
         return "The product search timed out. Please try a shorter or simpler query."
     except requests.exceptions.HTTPError as e:
@@ -118,7 +111,7 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
     except (json.JSONDecodeError, Exception) as e:
         return f"Could not parse search results: {e}"
 
-    # Build a clear summary so the agent can relay it with pros, cons, and exact URLs
+    # Build a clear summary so the agent can relay it with pros, cons, and store names
     parts = [_strip_citation_markers(result.overall_summary), ""]
     for i, rec in enumerate(result.recommendations[:5], 1):
         parts.append(f"--- Producto {i}: {rec.product_name} ---")
@@ -129,11 +122,8 @@ def _call_perplexity_product_search(query: str, user_context: str | None, api_ke
             parts.append("Contras: " + "; ".join(_strip_citation_markers(c) for c in rec.cons[:3]))
         if rec.estimated_price_range:
             parts.append(f"Precio aprox: {rec.estimated_price_range}")
-        # Show up to 2 purchase links per product
-        shop_sources = [s for s in rec.cited_sources if s.url.strip()][:2]
-        for j, src in enumerate(shop_sources, 1):
-            label = "Link" if len(shop_sources) == 1 else f"Link {j}"
-            parts.append(f"{label} (copiar exacto): {src.url.strip()}")
+        if rec.where_to_buy:
+            parts.append(f"Dónde comprar: {rec.where_to_buy}")
         parts.append("")
     if result.comparison and result.comparison.strip():
         comp = _strip_citation_markers(result.comparison).replace("**", "")
