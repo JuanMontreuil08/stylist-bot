@@ -78,7 +78,7 @@ def _call_serpapi_product_search(query: str, user_context: str | None, api_key: 
 
 @tool
 def search_clothing_catalog(query: str) -> str:
-    """Search the internal clothing catalog using AI-powered semantic search. Returns clothing items with detailed metadata (type, colors, style, formality, occasion, etc.) and image URLs from our curated collection."""
+    """Search the internal clothing catalog using AI-powered semantic search. Returns clothing items with detailed metadata (type, colors, style, formality, occasion, etc.) and image URLs from our curated collection. IMPORTANT: always translate the query to English before calling this tool, regardless of the language the user wrote in."""
     print("[search_clothing_catalog] query:", repr(query))
     from agentcore.context import send_search_ack
     send_search_ack()

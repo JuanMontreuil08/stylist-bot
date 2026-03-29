@@ -11,8 +11,10 @@ load_dotenv()
 
 from agentcore.agent import strands_agent_bedrock
 from kapso.handler import process_webhook_payload
+from catalog.router import router as catalog_router
 
 app = FastAPI()
+app.include_router(catalog_router)
 
 
 @app.get("/")

@@ -16,3 +16,4 @@ xai-sdk
 supabase
 openvto
 Pillow
+python-multipart

@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marketplace — AI Stylist</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    #hint-toast {
+      position: fixed;
+      top: 24px;
+      left: 24px;
+      z-index: 100;
+      background: linear-gradient(135deg, #7c3aed, #a855f7);
+      color: #fff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      padding: 10px 22px;
+      border-radius: 100px;
+      box-shadow: 0 4px 24px rgba(124, 58, 237, 0.45);
+      white-space: nowrap;
+      opacity: 0;
+      animation: hintAppear 0.6s ease 2s forwards, hintPulse 1.8s ease-in-out 2.6s 3, hintFade 0.8s ease 9s forwards;
+      pointer-events: none;
+    }
+
+    .hint-spark {
+      font-size: 0.65rem;
+      opacity: 0.8;
+      margin: 0 4px;
+    }
+
+    @keyframes hintAppear {
+      from { opacity: 0; transform: translateX(-10px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes hintPulse {
+      0%, 100% { box-shadow: 0 4px 24px rgba(124,58,237,0.45); }
+      50%       { box-shadow: 0 4px 36px rgba(168,85,247,0.75); }
+    }
+    @keyframes hintFade {
+      to { opacity: 0; transform: translateX(-6px); }
+    }
+
+    :root {
+      --bg: #fafafa;
+      --surface: #ffffff;
+      --text: #0a0a0a;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #0a0a0a;
+      --accent-hover: #374151;
+      --radius: 14px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Floating bubbles ── */
+    #bubbles {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 10;
+      overflow: hidden;
+    }
+
+    .bubble {
+      position: fixed;
+      font-size: 1.8rem;
+      opacity: 0;
+      animation: floatUp linear infinite;
+      user-select: none;
+    }
+
+    @keyframes moneyFloat {
+      0%   { opacity: 0; transform: translateY(0) scale(0.7); }
+      15%  { opacity: 1; transform: translateY(-8px) scale(1.1); }
+      80%  { opacity: 0.8; transform: translateY(-36px) scale(1); }
+      100% { opacity: 0; transform: translateY(-52px) scale(0.9); }
+    }
+
+    .bubble { cursor: pointer; pointer-events: auto; }
+
+    @keyframes floatUp {
+      0%   { transform: translateY(110vh) translateX(0px)   scale(0.9) rotate(-6deg); opacity: 0; }
+      8%   { opacity: 0.55; }
+      30%  { transform: translateY(70vh)  translateX(40px)  scale(1.0) rotate(6deg); }
+      55%  { transform: translateY(40vh)  translateX(-30px) scale(1.05) rotate(-4deg); }
+      80%  { transform: translateY(15vh)  translateX(25px)  scale(1.0) rotate(5deg); opacity: 0.45; }
+      100% { transform: translateY(-10vh) translateX(0px)   scale(0.9) rotate(-6deg); opacity: 0; }
+    }
+
+    /* ── Main layout ── */
+    .page {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 80px 20px 100px;
+      gap: 72px;
+    }
+
+    /* ── Scroll reveal ── */
+    .reveal {
+      opacity: 0;
+      transform: translateY(32px);
+      transition: opacity 0.7s ease, transform 0.7s ease;
+    }
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ── Hero text ── */
+    .hero {
+      text-align: center;
+      max-width: 640px;
+    }
+
+    .hero-badge-wrap {
+      display: inline-block;
+      position: relative;
+      border-radius: 100px;
+      padding: 1.5px;
+      margin-bottom: 28px;
+      background: conic-gradient(
+        from var(--angle, 0deg),
+        #b8860b, #ffd700, #fffacd, #ffd700, #b8860b, transparent 40%, transparent 60%, #b8860b
+      );
+      animation: rotateBorder 2.5s linear infinite;
+    }
+
+    @property --angle {
+      syntax: '<angle>';
+      initial-value: 0deg;
+      inherits: false;
+    }
+
+    @keyframes rotateBorder {
+      to { --angle: 360deg; }
+    }
+
+    .hero-badge {
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: var(--bg);
+      border-radius: 100px;
+      padding: 5px 14px;
+    }
+
+    .hero h1 {
+      font-size: clamp(2.4rem, 6vw, 4rem);
+      font-weight: 700;
+      line-height: 1.1;
+      letter-spacing: -0.03em;
+      margin-bottom: 20px;
+    }
+
+    .hero h1 em {
+      font-style: normal;
+      color: var(--muted);
+    }
+
+    .hero p {
+      font-size: 1rem;
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+
+    .steps {
+      display: flex;
+      justify-content: center;
+      gap: 32px;
+      margin-top: 36px;
+      flex-wrap: wrap;
+    }
+
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .step-num {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: var(--text);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    /* ── Upload zone ── */
+    .upload-section {
+      width: 100%;
+      max-width: 680px;
+    }
+
+    #drop-zone {
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      border-radius: var(--radius);
+      padding: 56px 32px;
+      text-align: center;
+      cursor: pointer;
+      background: rgba(255, 255, 255, 0.45);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255,255,255,0.8);
+      outline: 1.5px dashed rgba(0,0,0,0.15);
+      outline-offset: -12px;
+      transition: border-color 0.2s, background 0.2s, transform 0.2s, box-shadow 0.2s;
+    }
+
+    #drop-zone:hover, #drop-zone.drag-over {
+      background: rgba(255, 255, 255, 0.65);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255,255,255,0.9);
+      outline-color: rgba(0,0,0,0.35);
+      transform: scale(1.01);
+    }
+
+    .upload-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      margin: 0 auto 18px;
+    }
+
+    #drop-zone h2 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    #drop-zone p {
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    #drop-zone .hint {
+      margin-top: 10px;
+      font-size: 0.75rem;
+      color: #c0c0c0;
+    }
+
+    #file-input { display: none; }
+
+    /* ── States ── */
+    .state { display: none; }
+    .state.active { display: block; }
+
+    .spinner-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+      padding: 56px 32px;
+      background: var(--surface);
+      border-radius: var(--radius);
+      border: 1.5px solid var(--border);
+    }
+
+    .spinner {
+      width: 36px; height: 36px;
+      border: 2.5px solid var(--border);
+      border-top-color: var(--text);
+      border-radius: 50%;
+      animation: spin 0.75s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .spinner-label { font-size: 0.95rem; font-weight: 600; }
+    .spinner-sub { font-size: 0.8rem; color: var(--muted); }
+
+    .done-wrap, .error-wrap {
+      background: var(--surface);
+      border-radius: var(--radius);
+      border: 1.5px solid var(--border);
+      padding: 40px 32px;
+      text-align: center;
+    }
+
+    .done-wrap h2 { font-size: 1.1rem; font-weight: 700; margin-bottom: 6px; }
+    .done-wrap p { font-size: 0.85rem; color: var(--muted); }
+
+    .caption-list {
+      margin: 28px 0 8px;
+      text-align: left;
+    }
+
+    .caption-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 13px 0;
+      border-bottom: 1px solid var(--border);
+      opacity: 0;
+      transform: translateY(10px);
+      animation: rowIn 0.4s ease forwards;
+    }
+
+    .caption-row:last-child { border-bottom: none; }
+
+    @keyframes rowIn {
+      from { opacity: 0; transform: translateX(-14px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    .caption-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      flex-shrink: 0;
+      width: 90px;
+    }
+
+    .caption-value {
+      font-size: 0.88rem;
+      color: var(--text);
+      text-align: right;
+      line-height: 1.5;
+    }
+
+    .error-wrap h2 { font-size: 1rem; font-weight: 700; color: #dc2626; margin-bottom: 8px; }
+    .error-msg { font-size: 0.85rem; color: var(--muted); word-break: break-word; }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-block;
+      margin-top: 20px;
+      padding: 11px 26px;
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.15s;
+    }
+    .btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
+    .btn.ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1.5px solid var(--border);
+    }
+    .btn.ghost:hover { background: var(--bg); }
+
+    /* ── Gallery ── */
+    .gallery-section {
+      width: 100%;
+      max-width: 1000px;
+    }
+
+    .gallery-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    .gallery-header h2 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .gallery-count {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .gallery-empty {
+      text-align: center;
+      padding: 48px;
+      border: 1.5px dashed var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 16px;
+    }
+
+    .gallery-item {
+      background: var(--surface);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      overflow: hidden;
+      transition: transform 0.2s, box-shadow 0.2s;
+      cursor: default;
+    }
+
+    .gallery-item:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.08);
+    }
+
+    .gallery-item img {
+      width: 100%;
+      aspect-ratio: 4/5;
+      object-fit: cover;
+      display: block;
+    }
+
+    .gallery-meta {
+      padding: 12px 14px;
+    }
+
+    .gallery-meta .item-type {
+      font-size: 0.82rem;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .gallery-meta .item-brand {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .gallery-item.new-item {
+      animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+    }
+    @keyframes popIn {
+      from { opacity: 0; transform: scale(0.85); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Hint toast -->
+<div id="hint-toast">
+  <span class="hint-spark">✦</span>
+  Hint: click any floating emoji to start earning
+  <span class="hint-spark">✦</span>
+</div>
+
+<!-- Floating bubbles -->
+<div id="bubbles"></div>
+
+<div class="page">
+
+  <!-- ── HERO ── -->
+  <section class="hero reveal">
+    <div class="hero-badge-wrap"><span class="hero-badge">AI-powered marketplace</span></div>
+    <h1>Sell your clothes.<br/><em>Reach more buyers.</em></h1>
+    <p>Upload a photo — our AI analyzes and lists your garment instantly. Other users find it through their personal stylist on WhatsApp.</p>
+    <div class="steps">
+      <div class="step"><span class="step-num">1</span> Upload a photo</div>
+      <div class="step"><span class="step-num">2</span> AI catalogs it</div>
+      <div class="step"><span class="step-num">3</span> Buyers find it</div>
+    </div>
+  </section>
+
+  <!-- ── UPLOAD ── -->
+  <section class="upload-section reveal">
+
+    <!-- idle -->
+    <div id="state-idle" class="state active">
+      <div id="drop-zone">
+        <div class="upload-icon">📷</div>
+        <h2>Drop your photo here</h2>
+        <p>or <strong>click to browse</strong> from your device</p>
+        <p class="hint">JPEG · PNG · WebP &nbsp;·&nbsp; max 10 MB</p>
+      </div>
+      <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" />
+    </div>
+
+    <!-- uploading -->
+    <div id="state-uploading" class="state">
+      <div class="spinner-wrap">
+        <div class="spinner"></div>
+        <div class="spinner-label">Uploading photo...</div>
+      </div>
+    </div>
+
+    <!-- processing -->
+    <div id="state-processing" class="state">
+      <div class="spinner-wrap">
+        <div class="spinner"></div>
+        <div>
+          <div class="spinner-label">AI is analyzing your garment</div>
+          <div class="spinner-sub">This takes about 15–30 seconds</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- done -->
+    <div id="state-done" class="state">
+      <div class="done-wrap">
+        <div style="font-size:2rem;margin-bottom:12px">✓</div>
+        <h2>Listed successfully</h2>
+        <p>Your garment is now in the catalog and can be recommended to buyers.</p>
+        <div id="caption-container"></div>
+        <button class="btn ghost" onclick="resetToIdle()">Upload another item</button>
+      </div>
+    </div>
+
+    <!-- error -->
+    <div id="state-error" class="state">
+      <div class="error-wrap">
+        <div style="font-size:2rem;margin-bottom:12px">⚠</div>
+        <h2>Something went wrong</h2>
+        <p id="error-msg" class="error-msg"></p>
+        <button class="btn ghost" onclick="resetToIdle()">Try again</button>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ── GALLERY ── -->
+  <section class="gallery-section reveal">
+    <div class="gallery-header">
+      <h2>Recently listed</h2>
+      <span class="gallery-count" id="gallery-count"></span>
+    </div>
+    <div id="gallery-empty" class="gallery-empty">No items listed yet. Be the first to upload.</div>
+    <div id="gallery-grid" class="gallery-grid" style="display:none"></div>
+  </section>
+
+</div>
+
+<script>
+  // ── Bubbles ──
+  const EMOJIS = ['👗','👔','👕','👖','🧥','👟','👜','🧣','🧤','👒','🧢','👗','👠','🧦','🩱','🥻'];
+  const container = document.getElementById('bubbles');
+
+  function createBubble() {
+    const el = document.createElement('div');
+    el.className = 'bubble';
+    el.textContent = EMOJIS[Math.floor(Math.random() * EMOJIS.length)];
+    const size = 1.4 + Math.random() * 1.6;
+    el.style.cssText = `
+      left: ${Math.random() * 100}%;
+      font-size: ${size}rem;
+      animation-duration: ${8 + Math.random() * 10}s;
+      animation-delay: ${Math.random() * 4}s;
+    `;
+    container.appendChild(el);
+    el.addEventListener('animationiteration', () => {
+      el.style.left = `${Math.random() * 100}%`;
+    });
+    el.addEventListener('click', e => {
+      playCashSound();
+      spawnMoney(e.clientX - 16, e.clientY - 20);
+    });
+  }
+
+  // ── Cash sound (Web Audio API, no file needed) ──
+  function playCashSound() {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [[880, 0, 0.08], [1320, 0.08, 0.08], [1760, 0.14, 0.12]].forEach(([freq, start, dur]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ctx.currentTime + start);
+      gain.gain.linearRampToValueAtTime(0.18, ctx.currentTime + start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.01);
+    });
+  }
+
+  // ── Floating $100 on click ──
+  function spawnMoney(x, y) {
+    const el = document.createElement('div');
+    el.textContent = '$100';
+    el.style.cssText = `
+      position: fixed;
+      left: ${x}px;
+      top: ${y}px;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #22c55e;
+      pointer-events: none;
+      z-index: 9999;
+      animation: moneyFloat 1.1s ease forwards;
+      text-shadow: 0 1px 4px rgba(34,197,94,0.3);
+    `;
+    document.body.appendChild(el);
+    el.addEventListener('animationend', () => el.remove());
+  }
+
+  for (let i = 0; i < 22; i++) createBubble();
+
+  // ── Scroll reveal ──
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+  }, { threshold: 0.12 });
+
+  document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+  // ── Upload state machine ──
+  const STATES = ['idle','uploading','processing','done','error'];
+  let pollTimer = null;
+
+  function setState(name) {
+    STATES.forEach(s => {
+      document.getElementById('state-' + s).classList.toggle('active', s === name);
+    });
+  }
+
+  function resetToIdle() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    document.getElementById('file-input').value = '';
+    setState('idle');
+  }
+
+  const dropZone = document.getElementById('drop-zone');
+  const fileInput = document.getElementById('file-input');
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+  async function handleFile(file) {
+    setState('uploading');
+    const formData = new FormData();
+    formData.append('file', file);
+    let jobId;
+    try {
+      const res = await fetch('/catalog/upload', { method: 'POST', body: formData });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'HTTP ' + res.status);
+      jobId = data.job_id;
+    } catch (e) {
+      document.getElementById('error-msg').textContent = e.message;
+      setState('error');
+      return;
+    }
+    setState('processing');
+    pollStatus(jobId);
+  }
+
+  function pollStatus(jobId) {
+    pollTimer = setInterval(async () => {
+      try {
+        const res = await fetch('/catalog/status/' + jobId);
+        const data = await res.json();
+        if (data.status === 'done') {
+          clearInterval(pollTimer); pollTimer = null;
+          renderCaption(data.caption);
+          setState('done');
+          loadGallery();
+        } else if (data.status === 'error') {
+          clearInterval(pollTimer); pollTimer = null;
+          document.getElementById('error-msg').textContent = data.error || 'Unknown error';
+          setState('error');
+        }
+      } catch (e) {
+        clearInterval(pollTimer); pollTimer = null;
+        document.getElementById('error-msg').textContent = 'Network error while checking status.';
+        setState('error');
+      }
+    }, 2000);
+  }
+
+  const LABELS = {
+    tipo:'Type', colores_principales:'Colors', estilo:'Style',
+    formalidad:'Formality', ocasion:'Occasion', clima:'Climate',
+    material:'Material', marca:'Brand', funcionalidad:'Function',
+    caracteristicas_distintivas:'Details'
+  };
+
+  const RAINBOW = [
+    '#e05c5c', // red
+    '#e07c3a', // orange
+    '#c9a800', // gold
+    '#4caf7d', // green
+    '#29b6c5', // teal
+    '#4a8fe8', // blue
+    '#6f6de8', // indigo
+    '#a259d9', // purple
+    '#c74e8e', // pink
+    '#d94f4f', // rose
+  ];
+
+  function cleanValue(key, value) {
+    if (!value) return value;
+    let v = value.trim();
+
+    // Strip filler prefixes that Claude adds
+    v = v.replace(/^appears to be\s*/i, '');
+    v = v.replace(/^unknown[,.]?\s*/i, '');
+    v = v.replace(/^likely\s*/i, '');
+
+    const parts = v.split(',').map(s => s.trim()).filter(Boolean);
+
+    // Very verbose fields: first item only
+    if (['material', 'caracteristicas_distintivas', 'funcionalidad'].includes(key)) {
+      v = parts[0] || v;
+      if (v.length > 38) v = v.slice(0, 36) + '…';
+    } else if (['ocasion', 'clima', 'estilo'].includes(key)) {
+      // List fields: first 2 items
+      v = parts.slice(0, 2).join(', ');
+      if (v.length > 42) v = v.slice(0, 40) + '…';
+    } else {
+      if (v.length > 42) v = v.slice(0, 40) + '…';
+    }
+
+    // Capitalize first letter
+    return v.charAt(0).toUpperCase() + v.slice(1);
+  }
+
+  function renderCaption(caption) {
+    if (!caption) return;
+    const container = document.getElementById('caption-container');
+    container.innerHTML = '';
+
+    const list = document.createElement('div');
+    list.className = 'caption-list';
+
+    Object.entries(LABELS)
+      .filter(([k]) => caption[k])
+      .forEach(([k, label], i) => {
+        const row = document.createElement('div');
+        row.className = 'caption-row';
+        row.style.animationDelay = (i * 160) + 'ms';
+
+        const lbl = document.createElement('span');
+        lbl.className = 'caption-label';
+        lbl.style.color = RAINBOW[i % RAINBOW.length];
+        lbl.textContent = label;
+
+        const val = document.createElement('span');
+        val.className = 'caption-value';
+        val.textContent = cleanValue(k, caption[k]);
+
+        row.appendChild(lbl);
+        row.appendChild(val);
+        list.appendChild(row);
+      });
+
+    container.appendChild(list);
+  }
+
+  // ── Gallery ──
+  async function loadGallery() {
+    try {
+      const res = await fetch('/catalog/items');
+      const items = await res.json();
+      renderGallery(items);
+    } catch (e) {
+      // silently fail — gallery is non-critical
+    }
+  }
+
+  function renderGallery(items) {
+    const empty = document.getElementById('gallery-empty');
+    const grid = document.getElementById('gallery-grid');
+    const count = document.getElementById('gallery-count');
+
+    if (!items || items.length === 0) {
+      empty.style.display = '';
+      grid.style.display = 'none';
+      count.textContent = '';
+      return;
+    }
+
+    empty.style.display = 'none';
+    grid.style.display = 'grid';
+    count.textContent = `${items.length} item${items.length !== 1 ? 's' : ''}`;
+
+    // Only re-render if count changed
+    if (grid.children.length === items.length) return;
+
+    grid.innerHTML = '';
+    items.forEach((item, i) => {
+      const card = document.createElement('div');
+      card.className = 'gallery-item' + (i === 0 ? ' new-item' : '');
+      const c = item.caption || {};
+      card.innerHTML = `
+        <img src="${item.image_url}" alt="${c.tipo || 'Garment'}" loading="lazy" />
+        <div class="gallery-meta">
+          <div class="item-type">${c.tipo || '—'}</div>
+          <div class="item-brand">${[c.marca, c.colores_principales].filter(Boolean).join(' · ') || ''}</div>
+        </div>
+      `;
+      grid.appendChild(card);
+    });
+  }
+
+  // Load gallery on page load
+  loadGallery();
+</script>
+</body>
+</html>

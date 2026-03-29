@@ -34,9 +34,11 @@ print(f"Processed {processed} images")
 print(f"Errors {errors} images")
 """
 
-image_url = "/Users/juanmontreuil/Desktop/Startup v2/images/pantalon.png"
+image_path = "/Users/juanmontreuil/Desktop/Startup v2/images/pantalon.png"
+with open(image_path, "rb") as f:
+    image_bytes = f.read()
 result = process_and_upload_image(
-    image_url=image_url,
+    image_bytes=image_bytes,
     bucket_name=S3_IMAGE_BUCKET,
     s3_key="prendas/pantalon.png"
 )
