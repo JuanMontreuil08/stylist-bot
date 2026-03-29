@@ -8,7 +8,6 @@ import boto3
 import requests
 from strands import tool
 from dotenv import load_dotenv
-from pydantic import BaseModel
 import unicodedata
 from openvto import OpenVTO
 from openvto.types import ImageModel
@@ -20,116 +19,61 @@ load_dotenv()
 bedrock_agent = boto3.client('bedrock-agent-runtime', region_name='us-east-1')
 KB_ID = os.getenv("KNOWLEDGE_BASE_ID")
 
-# --- Perplexity online product search (inspired by PerplexiCart) ---
-PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
-PERPLEXITY_MODEL = os.getenv("PERPLEXITY_MODEL", "sonar")
+# --- SerpAPI Google Shopping product search ---
+SERPAPI_URL = "https://serpapi.com/search"
 
 
-class _ProductRecommendation(BaseModel):
-    product_name: str
-    summary: str
-    pros: list[str]
-    cons: list[str]
-    estimated_price_range: str | None = None
-    where_to_buy: str | None = None  # brand/store name only, no URL
-
-
-class _OnlineProductSearchResult(BaseModel):
-    overall_summary: str
-    recommendations: list[_ProductRecommendation]
-    comparison: str  # Short comparison between the options (who to choose which, tradeoffs)
-    general_tips: list[str] | None = None
-
-
-import re as _re
-
-def _strip_citation_markers(text: str) -> str:
-    """Remove Perplexity inline citation markers like [1], [2][3] from text."""
-    return _re.sub(r"\[\d+\]", "", text).strip()
-
-
-def _call_perplexity_product_search(query: str, user_context: str | None, api_key: str) -> str:
-    """Call Perplexity Sonar for general product search; returns a plain-text summary for the agent."""
-    system_prompt = (
-        "You are a helpful shopping advisor. The user is asking for product recommendations or research. "
-        "Search the web for relevant products, reviews, and comparisons. "
-        "Your response MUST be a JSON object with the exact schema provided. "
-        "Always return between 3 and 5 product recommendations. "
-        "For each recommendation include: product_name, a short summary, pros, cons, estimated_price_range when possible, "
-        "and where_to_buy (store or brand name only, e.g. 'Ripley', 'Amazon', 'Nike.com' — do NOT include any URL). "
-        "Do NOT generate or invent any URLs. "
-        "If the user specifies a budget, do NOT recommend products whose price exceeds that budget. If no in-budget option exists, say so clearly and suggest the closest affordable alternative. "
-        "In the 'comparison' field write a short paragraph comparing the options: who should choose which product, main tradeoffs, and when to pick one over another. "
-        "Keep recommendations actionable and concise. "
-        "If the user provides extra context (budget, preferences, location), take it into account."
-    )
-    context_line = f" Additional context from the user: {user_context}." if user_context else ""
-    user_content = f"Search for products or advice about: {query}.{context_line} Return the result in the required JSON format."
-
-    schema_payload = {"schema": _OnlineProductSearchResult.model_json_schema()}
-    payload = {
-        "model": PERPLEXITY_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "search_language_filter": ["es"],
-        "response_format": {"type": "json_schema", "json_schema": schema_payload},
-        "temperature": 0.5,
-        "search_context_size": "medium",
-        "web_search_options": {
-            "user_location": {"country": "PE"},
-        },
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+def _call_serpapi_product_search(query: str, user_context: str | None, api_key: str) -> str:
+    """Call SerpAPI Google Shopping for product search; returns verified product data for the agent."""
+    combined_query = f"{query} {user_context}" if user_context else query
+    params = {
+        "engine": "google_shopping",
+        "q": combined_query,
+        "hl": "es",
+        "num": 3,
+        "api_key": api_key,
     }
 
     try:
-        response = requests.post(PERPLEXITY_API_URL, headers=headers, json=payload, timeout=60)
+        response = requests.get(SERPAPI_URL, params=params)
         response.raise_for_status()
         data = response.json()
-        usage = data.get("usage", {})
-        print(f"[search_products_online] tokens={usage.get('total_tokens')} cost={usage.get('cost', {}).get('total_cost')}")
-        raw_content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        if not raw_content:
-            return "No response from search."
-        result = _OnlineProductSearchResult.model_validate_json(raw_content)
-
-    except requests.exceptions.Timeout:
-        return "The product search timed out. Please try a shorter or simpler query."
     except requests.exceptions.HTTPError as e:
-        msg = str(e.response.status_code)
-        try:
-            err = e.response.json()
-            msg += f" - {err.get('error', {}).get('message', e.response.text)}"
-        except Exception:
-            msg += f" - {e.response.text}"
-        return f"Search service error: {msg}"
-    except (json.JSONDecodeError, Exception) as e:
-        return f"Could not parse search results: {e}"
+        return f"Search service error: {e.response.status_code} - {e.response.text[:200]}"
+    except Exception as e:
+        return f"Could not fetch search results: {e}"
 
-    # Build a clear summary so the agent can relay it with pros, cons, and store names
-    parts = [_strip_citation_markers(result.overall_summary), ""]
-    for i, rec in enumerate(result.recommendations[:5], 1):
-        parts.append(f"--- Producto {i}: {rec.product_name} ---")
-        parts.append(_strip_citation_markers(rec.summary))
-        if rec.pros:
-            parts.append("Pros: " + "; ".join(_strip_citation_markers(p) for p in rec.pros[:5]))
-        if rec.cons:
-            parts.append("Contras: " + "; ".join(_strip_citation_markers(c) for c in rec.cons[:3]))
-        if rec.estimated_price_range:
-            parts.append(f"Precio aprox: {rec.estimated_price_range}")
-        if rec.where_to_buy:
-            parts.append(f"Dónde comprar: {rec.where_to_buy}")
+    results = data.get("shopping_results", [])
+    print(f"[search_products_online] SerpAPI returned {len(results)} results for: {repr(combined_query)}")
+
+    if not results:
+        return "No products found on Google Shopping for this query. Try rephrasing or use search_clothing_catalog."
+
+    parts = [f"Google Shopping results for: {combined_query}", ""]
+    for i, item in enumerate(results[:3], 1):
+        title = item.get("title", "")
+        price = item.get("price", "Price not available")
+        source = item.get("source", "")
+        link = item.get("product_link", "") or item.get("link", "")
+        rating = item.get("rating")
+        reviews = item.get("reviews")
+
+        parts.append(f"--- Product {i}: {title} ---")
+        parts.append(f"Price: {price}")
+        if source:
+            parts.append(f"Store: {source}")
+        if link:
+            parts.append(f"URL: {link}")
+        if rating:
+            review_str = f" ({reviews} reviews)" if reviews else ""
+            parts.append(f"Rating: {rating}/5{review_str}")
         parts.append("")
-    if result.comparison and result.comparison.strip():
-        comp = _strip_citation_markers(result.comparison).replace("**", "")
-        parts.append("Comparación entre opciones: " + comp)
-    if result.general_tips:
-        parts.append("\nTips: " + " | ".join(_strip_citation_markers(t) for t in result.general_tips[:3]))
+
+    parts.append(
+        "INSTRUCTION: The prices and URLs above are real verified data from Google Shopping — "
+        "share them exactly as they appear, do not modify them. "
+        "Use your own knowledge about these brands/products to add pros, cons, and recommendations."
+    )
     return "\n".join(parts).strip()
 
 @tool
@@ -187,20 +131,24 @@ def search_clothing_catalog(query: str) -> str:
 def search_products_online(query: str, user_context: str | None = None) -> str:
     """Search the internet for product recommendations and reviews. Use for products NOT in our catalog (other clothing brands, electronics, skincare, etc.).
 
-    Args:
-        query: The main search question—what the user is looking for (e.g. "best running shoes", "crema hidratante piel seca", "chaqueta estilo bomber"). Put only the product/category and style here.
-        user_context: Optional. Extra constraints the user mentioned: budget ("presupuesto 50€", "under 100"), preferences ("vegan", "sin perfume"), location ("en España"), or other details. Leave None if they did not give any.
+    IMPORTANT: Always translate both `query` and `user_context` to English before calling this tool,
+    regardless of the language the user wrote in. English queries return significantly better Google Shopping results.
+    Example: user says "casaca north face gris hombre" → query="north face gray men's jacket"
 
-    Returns a short summary with product names, pros/cons, and approximate prices. Do not use for clothing we may have—use search_clothing_catalog first for that."""
-    api_key = os.getenv("PERPLEXITY_API_KEY")
+    Args:
+        query: The main search question in ENGLISH (e.g. "gray north face men's jacket", "moisturizing cream dry skin", "bomber style jacket"). Product/category and style only.
+        user_context: Optional. Extra constraints the user explicitly mentioned in this message (e.g. "budget 100 USD", "slim fit", "for the gym"). Leave None if they said nothing specific.
+
+    Returns real product listings from Google Shopping with verified prices and URLs. Do not use for clothing we may have—use search_clothing_catalog first for that."""
+    api_key = os.getenv("SERPAPI_KEY")
     if not api_key:
-        return "Online product search is not configured (missing PERPLEXITY_API_KEY). I can only search our clothing catalog."
+        return "Online product search is not configured (missing SERPAPI_KEY). I can only search our clothing catalog."
     print("[search_products_online] query:", repr(query), "context:", repr(user_context))
 
     from agentcore.context import send_search_ack
     send_search_ack()
 
-    return _call_perplexity_product_search(query, user_context, api_key)
+    return _call_serpapi_product_search(query, user_context, api_key)
 
 
 _SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
@@ -278,7 +226,7 @@ def _sanitize_garment_slug(description: str, max_len: int = 25) -> str:
     s = s.replace("-", "_")
     s = "".join(c if c.isalnum() or c == "_" else " " for c in s)
     s = "_".join(s.split()).lower()[:max_len].strip("_")
-    return s or "prenda"
+    return s or "garment"
 
 
 @tool
@@ -286,7 +234,7 @@ def initiate_voice_call(phone_number: str, opening_message: str) -> str:
     """Start a voice call to the user. Use it whenever the user asks to be called, follows up by phone, or wants to contact by voice.
 
     Args:
-        phone_number: Phone number in E.164 format (ej. +51995132783).
+        phone_number: Phone number in E.164 format (e.g. +51995132783).
         opening_message: Opening message that the bot will say when connecting the call. You must generate it from the conversation (e.g. "Hello, here Benito from The North Face. I'm calling you for your inquiry about sizes. How can I help you?"). Do not leave this field empty.
     """
     if not VOICE_BOT_URL:
@@ -476,7 +424,7 @@ def tryon_upload_photo(
                 supabase.table("tryon_profiles").upsert(row, on_conflict="user_id").execute()
             except Exception:
                 supabase.table("tryon_profiles").insert(row).execute()
-            return json.dumps({"ok": True, "message": "Selfie guardada correctamente. Si ya tenías una, se actualizó.", "path": path})
+            return json.dumps({"ok": True, "message": "Selfie saved successfully. If you already had one, it was updated.", "path": path})
 
         if photo_type == "full_body":
             path = f"{phone_number}/full_body.{ext}"
@@ -488,7 +436,7 @@ def tryon_upload_photo(
                 supabase.table("tryon_profiles").upsert(row, on_conflict="user_id").execute()
             except Exception:
                 supabase.table("tryon_profiles").insert(row).execute()
-            return json.dumps({"ok": True, "message": "Foto full body guardada correctamente. Si ya tenías una, se actualizó.", "path": path})
+            return json.dumps({"ok": True, "message": "Full body photo saved successfully. If you already had one, it was updated.", "path": path})
 
         # garment
         slug = _sanitize_garment_slug(garment_description)
@@ -496,7 +444,7 @@ def tryon_upload_photo(
         path = f"{phone_number}/{slug}_{uid}.{ext}"
         bucket = TRYON_CLOTHES_BUCKET
         supabase.storage.from_(bucket).upload(path, image_bytes, {"content-type": ct or "image/jpeg"})
-        return json.dumps({"ok": True, "message": f"Prenda guardada: {slug}.", "path": path})
+        return json.dumps({"ok": True, "message": f"Garment saved: {slug}.", "path": path})
 
     except requests.RequestException as e:
         return json.dumps({"ok": False, "error": f"Failed to download image: {e}"})
